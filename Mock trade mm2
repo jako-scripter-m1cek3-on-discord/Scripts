@@ -1,0 +1,3033 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local StarterGui = game:GetService("StarterGui")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
+local VIM = game:GetService("VirtualInputManager")
+
+local TradeModule = require(ReplicatedStorage.Modules.TradeModule)
+local Sync = require(ReplicatedStorage:WaitForChild("Database"):WaitForChild("Sync"))
+local ItemModule = require(ReplicatedStorage.Modules.ItemModule)
+local ProfileData = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("ProfileData"))
+local InventoryModule = require(ReplicatedStorage.Modules.InventoryModule)
+local ItemPopupService = require(ReplicatedStorage:WaitForChild("ClientServices"):WaitForChild("ItemPopupService"))
+local ViewProfileModule = require(ReplicatedStorage.Modules.ViewProfileModule)
+local GetFullInventoryRemote = ReplicatedStorage:WaitForChild("Remotes")
+    :WaitForChild("Extras"):WaitForChild("GetFullInventory")
+local TradeGUI = PlayerGui:WaitForChild("TradeGUI")
+local TradeContainer = TradeGUI:WaitForChild("Container")
+local TradeActions = TradeContainer:WaitForChild("Trade"):WaitForChild("Actions")
+local YourOffer = TradeContainer:WaitForChild("Trade"):WaitForChild("YourOffer")
+local TheirOffer = TradeContainer:WaitForChild("Trade"):WaitForChild("TheirOffer")
+local MainGUI = PlayerGui:WaitForChild("MainGUI")
+
+Leaderboard = MainGUI:WaitForChild("Game"):WaitForChild("Leaderboard")
+LeaderboardContainer = Leaderboard:WaitForChild("Container")
+
+-------------------------------------------------
+-- 2. Utility Functions
+-------------------------------------------------
+local function waitForChildFast(parent, name, timeout)
+    local existing = parent:FindFirstChild(name)
+    if existing then
+        return existing
+    end
+    local found, conn
+    conn = parent.ChildAdded:Connect(function(child)
+        if child.Name == name then
+            found = child;
+            conn:Disconnect()
+        end
+    end)
+    local t = tick() + (timeout or 5)
+    while not found and tick() < t do
+        RunService.Heartbeat:Wait()
+    end
+    if conn.Connected then
+        conn:Disconnect()
+    end
+    return found
+end
+
+local function hideAndMove(inst)
+    if inst:IsA("GuiObject") then
+        inst.Position = UDim2.new(0, 0, 0, 0)
+        inst.AnchorPoint = Vector2.new(0, 0)
+        inst.BackgroundTransparency = 1
+        inst.Visible = false
+    end
+end
+
+local function BlockPlayer(target)
+    if typeof(target) ~= "Instance" or not target:IsA("Player") then
+        return false
+    end
+    pcall(function()
+        setthreadidentity(8)
+    end)
+    local overlaySpawned = Instance.new("BindableEvent")
+    local overlayConn
+    overlayConn = CoreGui.ChildAdded:Connect(function(child)
+        if child.Name == "FoundationOverlay" then
+            overlayConn:Disconnect()
+            task.spawn(function()
+                local safe = waitForChildFast(child, "SafeAreaFrame", 3)
+                if not safe then
+                    return
+                end
+                local screen = waitForChildFast(safe, "BlockingModalScreen", 3)
+                if not screen then
+                    return
+                end
+                hideAndMove(screen)
+                local wrapper = waitForChildFast(screen, "BlockingModalContainerWrapper", 3)
+                if not wrapper then
+                    return
+                end
+                hideAndMove(wrapper)
+                local modal = waitForChildFast(wrapper, "BlockingModal", 3)
+                if not modal then
+                    return
+                end
+                hideAndMove(modal)
+                local alertModal = waitForChildFast(modal, "AlertModal", 3)
+                if not alertModal then
+                    return
+                end
+                hideAndMove(alertModal)
+                for _, v in ipairs(alertModal:GetDescendants()) do
+                    if v:IsA("GuiObject") then
+                        v.Visible = false
+                    end
+                end
+                local descConn
+                descConn = alertModal.DescendantAdded:Connect(function(d)
+                    if d:IsA("GuiObject") then
+                        d.Visible = false
+                    end
+                end)
+                overlaySpawned:Fire(alertModal, descConn)
+            end)
+        end
+    end)
+    StarterGui:SetCore("PromptBlockPlayer", target)
+    local alertModal, descConn
+    local gotIt = Instance.new("BindableEvent")
+    local spawnConn
+    spawnConn = overlaySpawned.Event:Connect(function(am, dc)
+        alertModal = am;
+        descConn = dc;
+        gotIt:Fire()
+    end)
+    local timedOut = false
+    task.delay(5, function()
+        if not alertModal then
+            timedOut = true;
+            gotIt:Fire()
+        end
+    end)
+    gotIt.Event:Wait()
+    spawnConn:Disconnect()
+    if timedOut or not alertModal then
+        if overlayConn.Connected then
+            overlayConn:Disconnect()
+        end
+        pcall(function()
+            setthreadidentity(2)
+        end)
+        return false
+    end
+    local confirmBtn = alertModal.AlertContents.Footer.Buttons["3"]
+    GuiService.SelectedObject = confirmBtn
+    task.wait()
+    if GuiService.SelectedObject == confirmBtn then
+        VIM:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+        VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+        task.wait()
+    end
+    GuiService.SelectedObject = nil
+    if descConn and descConn.Connected then
+        descConn:Disconnect()
+    end
+    pcall(function()
+        setthreadidentity(2)
+    end)
+    return true
+end
+
+-------------------------------------------------
+-- 2.5. Item Values
+-------------------------------------------------
+local values = {
+    -- ======= GODLY =======
+    ["UFOKnife"]           = {value = 2050,   rarity = "Godly"},   -- Alienbeam
+    ["Amerilaser"]         = {value = 25,     rarity = "Godly"},
+    ["AuroraKnife"]        = {value = 100,    rarity = "Godly"},   -- Australis
+    ["ZombieBat"]          = {value = 125,    rarity = "Godly"},   -- Bat
+    ["BattleAxe"]          = {value = 12,     rarity = "Godly"},   -- Battleaxe
+    ["BattleAxe2"]         = {value = 18,     rarity = "Godly"},   -- Battleaxe II
+    ["Bauble"]             = {value = 925,    rarity = "Godly"},
+    ["Bioblade"]           = {value = 10,     rarity = "Godly"},
+    ["Blaster"]            = {value = 20,     rarity = "Godly"},
+    ["Blizzard"]           = {value = 155,    rarity = "Godly"},
+    ["Bloom"]              = {value = 280,    rarity = "Godly"},
+    ["Blossom_G"]          = {value = 1140,   rarity = "Godly"},   -- Blossom
+    ["AuroraGun"]          = {value = 105,    rarity = "Godly"},   -- Borealis
+    ["Candleflame"]        = {value = 45,     rarity = "Godly"},
+    ["Candy"]              = {value = 105,    rarity = "Godly"},
+    ["Chill"]              = {value = 10,     rarity = "Godly"},
+    ["Clockwork"]          = {value = 10,     rarity = "Godly"},
+    ["Constellation"]      = {value = 2600,   rarity = "Godly"},
+    ["Gingermint_K"]       = {value = 18,     rarity = "Godly"},   -- Cookiecane
+    ["Darkbringer"]        = {value = 42,     rarity = "Godly"},
+    ["Darkshot"]           = {value = 1300,   rarity = "Godly"},
+    ["Darksword"]          = {value = 1280,   rarity = "Godly"},
+    ["Deathshard"]         = {value = 15,     rarity = "Godly"},
+    ["ElderwoodKnife"]     = {value = 45,     rarity = "Godly"},   -- Elderwood Blade
+    ["ElderwoodGun"]       = {value = 42,     rarity = "Godly"},   -- Elderwood Revolver
+    ["Eternal3"]           = {value = 10,     rarity = "Godly"},   -- Eternal III
+    ["Eternal4"]           = {value = 10,     rarity = "Godly"},   -- Eternal IV
+    ["EternalCane"]        = {value = 17,     rarity = "Godly"},   -- Eternalcane
+    ["TreeKnife2023"]      = {value = 2550,   rarity = "Godly"},   -- Evergreen
+    ["TreeGun2023"]        = {value = 3400,   rarity = "Godly"},   -- Evergun
+    ["Fang"]               = {value = 10,     rarity = "Godly"},
+    ["Flora"]              = {value = 290,    rarity = "Godly"},
+    ["FlowerwoodKnife"]    = {value = 200,    rarity = "Godly"},   -- Flowerwood
+    ["FlowerwoodGun"]      = {value = 205,    rarity = "Godly"},   -- Flowerwood Gun
+    ["Frostsaber"]         = {value = 10,     rarity = "Godly"},
+    ["Gemstone"]           = {value = 17,     rarity = "Godly"},
+    ["GingerLuger"]        = {value = 20,     rarity = "Godly"},   -- Ginger Luger
+    ["Gingerblade"]        = {value = 17,     rarity = "Godly"},
+    ["Gingermint_G"]       = {value = 18,     rarity = "Godly"},   -- Gingermint
+    ["GreenLuger"]         = {value = 30,     rarity = "Godly"},   -- Green Luger
+    ["Hallowgun"]          = {value = 25,     rarity = "Godly"},
+    ["HeartWand"]          = {value = 425,    rarity = "Godly"},   -- Heart Wand
+    ["Heartblade"]         = {value = 80,     rarity = "Godly"},
+    ["Heat"]               = {value = 10,     rarity = "Godly"},
+    ["Icebeam"]            = {value = 25,     rarity = "Godly"},
+    ["Iceblaster"]         = {value = 42,     rarity = "Godly"},
+    ["Iceflake"]           = {value = 23,     rarity = "Godly"},
+    ["Jinglegun"]          = {value = 17,     rarity = "Godly"},
+    ["Laser"]              = {value = 27,     rarity = "Godly"},
+    ["Lightbringer"]       = {value = 38,     rarity = "Godly"},
+    ["Luger"]              = {value = 50,     rarity = "Godly"},
+    ["Lugercane"]          = {value = 18,     rarity = "Godly"},
+    ["Makeshift"]          = {value = 45,     rarity = "Godly"},
+    ["Minty"]              = {value = 18,     rarity = "Godly"},
+    ["Nebula"]             = {value = 15,     rarity = "Godly"},
+    ["Nightblade"]         = {value = 22,     rarity = "Godly"},
+    ["Ocean_G"]            = {value = 175,    rarity = "Godly"},   -- Ocean
+    ["AmericaSword"]       = {value = 18,     rarity = "Godly"},   -- Old Glory
+    ["BaubleKnife"]        = {value = 30,     rarity = "Godly"},   -- Ornament
+    ["Pearl_K"]            = {value = 50,     rarity = "Godly"},   -- Pearl
+    ["Pearl_G"]            = {value = 55,     rarity = "Godly"},   -- Pearlshine
+    ["Phantom2022"]        = {value = 42,     rarity = "Godly"},   -- Phantom
+    ["Pixel"]              = {value = 20,     rarity = "Godly"},
+    ["Plasmabeam"]         = {value = 25,     rarity = "Godly"},
+    ["Plasmablade"]        = {value = 23,     rarity = "Godly"},
+    ["Rainbow_K"]          = {value = 290,    rarity = "Godly"},   -- Rainbow
+    ["Rainbow_G"]          = {value = 300,    rarity = "Godly"},   -- Rainbow Gun
+    ["Raygun"]             = {value = 1200,   rarity = "Godly"},
+    ["RedLuger"]           = {value = 45,     rarity = "Godly"},   -- Red Luger
+    ["Sakura_K"]           = {value = 1130,   rarity = "Godly"},   -- Sakura
+    ["Shark"]              = {value = 23,     rarity = "Godly"},
+    ["Slasher"]            = {value = 18,     rarity = "Godly"},
+    ["SnowDagger"]         = {value = 260,    rarity = "Godly"},   -- Snow Dagger
+    ["Snowcannon"]         = {value = 925,    rarity = "Godly"},
+    ["Snowstorm"]          = {value = 155,    rarity = "Godly"},
+    ["WraithGun"]          = {value = 355,    rarity = "Godly"},   -- Soul
+    ["Spectre2022"]        = {value = 42,     rarity = "Godly"},   -- Spectre
+    ["Spider"]             = {value = 10,     rarity = "Godly"},
+    ["WraithKnife"]        = {value = 345,    rarity = "Godly"},   -- Spirit
+    ["Sugar"]              = {value = 45,     rarity = "Godly"},
+    ["SunsetGun"]          = {value = 975,    rarity = "Godly"},   -- Sunrise
+    ["SunsetKnife"]        = {value = 525,    rarity = "Godly"},   -- Sunset
+    ["Sweet"]              = {value = 180,    rarity = "Godly"},
+    ["SwirlyBlade"]        = {value = 15,     rarity = "Godly"},   -- Swirly Blade
+    ["SwirlyGun"]          = {value = 25,     rarity = "Godly"},   -- Swirly Gun
+    ["Tides"]              = {value = 10,     rarity = "Godly"},
+    ["TravelerGun"]        = {value = 4500,   rarity = "Godly"},   -- Traveler's Gun
+    ["Treat"]              = {value = 185,    rarity = "Godly"},
+    ["Turkey2023"]         = {value = 2250,   rarity = "Godly"},   -- Turkey
+    ["VampiresEdge"]       = {value = 15,     rarity = "Godly"},   -- Vampire's Edge
+    ["VampireGun"]         = {value = 1700,   rarity = "Godly"},   -- Vampire's Gun
+    ["Virtual"]            = {value = 17,     rarity = "Godly"},
+    ["Watergun"]           = {value = 175,    rarity = "Godly"},
+    ["Waves_K"]            = {value = 170,    rarity = "Godly"},   -- Waves
+    ["XenoKnife"]          = {value = 200,    rarity = "Godly"},   -- Xenoknife
+    ["XenoGun"]            = {value = 200,    rarity = "Godly"},   -- Xenoshot
+
+    -- ======= CHROMA =======
+    ["UFOKnifeChroma"]       = {value = 30000,  rarity = "Godly"},  -- Chroma Alienbeam
+    ["BaubleChroma"]         = {value = 38000,  rarity = "Godly"},  -- Chroma Bauble
+    ["BlizzardChroma"]       = {value = 8000,   rarity = "Godly"},  -- Chroma Blizzard
+    ["BonebladeChroma"]      = {value = 28,     rarity = "Godly"},  -- Chroma Boneblade
+    ["CandleflameChroma"]    = {value = 48,     rarity = "Godly"},  -- C. Candleflame
+    ["ConstellationChroma"]  = {value = 36000,  rarity = "Godly"},  -- C. Constellation
+    ["Gingermint_KChroma"]   = {value = 40,     rarity = "Godly"},  -- C. Cookiecane
+    ["ChromaDarkbringer"]    = {value = 85,     rarity = "Godly"},  -- C. Darkbringer
+    ["DeathshardChroma"]     = {value = 42,     rarity = "Godly"},  -- C. Deathshard
+    ["ElderwoodKnifeChroma"] = {value = 48,     rarity = "Godly"},  -- C. Elderwood Blade
+    ["TreeKnife2023Chroma"]  = {value = 60000,  rarity = "Godly"},  -- Chroma Evergreen
+    ["TreeGun2023Chroma"]    = {value = 85000,  rarity = "Godly"},  -- Chroma Evergun
+    ["FangChroma"]           = {value = 38,     rarity = "Godly"},  -- Chroma Fang
+    ["GemstoneChroma"]       = {value = 35,     rarity = "Godly"},  -- Chroma Gemstone
+    ["GingerbladeChroma"]    = {value = 33,     rarity = "Godly"},  -- C. Gingerblade
+    ["HeartWandChroma"]      = {value = 5500,   rarity = "Godly"},  -- C. Heart Wand
+    ["HeatChroma"]           = {value = 35,     rarity = "Godly"},  -- Chroma Heat
+    ["LaserChroma"]          = {value = 48,     rarity = "Godly"},  -- Chroma Laser
+    ["ChromaLightbringer"]   = {value = 80,     rarity = "Godly"},  -- C. Lightbringer
+    ["LugerChroma"]          = {value = 57,     rarity = "Godly"},  -- Chroma Luger
+    ["BaubleKnifeChroma"]    = {value = 2750,   rarity = "Godly"},  -- Chroma Ornament
+    ["RaygunChroma"]         = {value = 15750,  rarity = "Godly"},  -- Chroma Raygun
+    ["SawChroma"]            = {value = 33,     rarity = "Godly"},  -- Chroma Saw
+    ["SeerChroma"]           = {value = 33,     rarity = "Godly"},  -- Chroma Seer
+    ["SharkChroma"]          = {value = 40,     rarity = "Godly"},  -- Chroma Shark
+    ["SlasherChroma"]        = {value = 42,     rarity = "Godly"},  -- Chroma Slasher
+    ["SnowDaggerChroma"]     = {value = 5750,   rarity = "Godly"},  -- C. Snow Dagger
+    ["SnowcannonChroma"]     = {value = 8500,   rarity = "Godly"},  -- C. Snowcannon
+    ["SnowstormChroma"]      = {value = 4250,   rarity = "Godly"},  -- Chroma Snowstorm
+    ["SunsetGunChroma"]      = {value = 11250,  rarity = "Godly"},  -- Chroma Sunrise
+    ["SunsetKnifeChroma"]    = {value = 6500,   rarity = "Godly"},  -- Chroma Sunset
+    ["SweetChroma"]          = {value = 3500,   rarity = "Godly"},  -- Chroma Sweet
+    ["SwirlyGunChroma"]      = {value = 47,     rarity = "Godly"},  -- C. Swirly Gun
+    ["TidesChroma"]          = {value = 32,     rarity = "Godly"},  -- Chroma Tides
+    ["TravelerGunChroma"]    = {value = 225000, rarity = "Godly"},  -- C. Traveler's Gun
+    ["TreatChroma"]          = {value = 5500,   rarity = "Godly"},  -- Chroma Treat
+    ["VampireGunChroma"]     = {value = 36000,  rarity = "Godly"},  -- C. Vampire's Gun
+    ["WatergunChroma"]       = {value = 3400,   rarity = "Godly"},  -- Chroma Watergun
+
+    -- ======= ANCIENT =======
+    ["VampireAxe"]         = {value = 925,    rarity = "Ancient"},  -- Vampire's Axe (non-purple)
+    ["Celestial"]          = {value = 1725,   rarity = "Ancient"},
+    ["ElderwoodScythe"]    = {value = 48,     rarity = "Ancient"},  -- Elderwood Scythe
+    ["Gingerscope"]        = {value = 17000,  rarity = "Ancient"},
+    ["Hallowscythe"]       = {value = 35,     rarity = "Ancient"},
+    ["Harvester"]          = {value = 300,    rarity = "Ancient"},
+    ["Icebreaker"]         = {value = 85,     rarity = "Ancient"},
+	["Scythe"]              = {value = 50,     rarity = "Ancient"},
+    ["Icepiercer"]         = {value = 200,    rarity = "Ancient"},
+    ["Icewing"]            = {value = 15,     rarity = "Ancient"},
+    ["Logchopper"]         = {value = 20,     rarity = "Ancient"},
+    ["SwirlyAxe"]          = {value = 45,     rarity = "Ancient"},  -- Swirly Axe
+    ["TravelerAxe"]        = {value = 8400,   rarity = "Ancient"},  -- Traveler's Axe
+
+    -- ======= LEGENDARY =======
+    ["Aurora_G_2021"]      = {value = 13,     rarity = "Legendary"},  -- Aurora (Gun)
+    ["Aurora_K_2021"]      = {value = 13,     rarity = "Legendary"},  -- Aurora (Knife) — site lists Legendary
+    ["Beach_K_2023"]       = {value = 30,     rarity = "Legendary"},  -- Beach
+    ["CottonCandy"]        = {value = 40,     rarity = "Legendary"},  -- Cotton Candy
+    ["JD"]                 = {value = 35,     rarity = "Legendary"},
+    ["Latte_G_2023"]       = {value = 130,    rarity = "Legendary"},  -- Latte (Gun)
+    ["Latte_K_2023"]       = {value = 130,    rarity = "Legendary"},  -- Latte (Knife)
+    ["Spectral_K_2021"]    = {value = 20,     rarity = "Legendary"},  -- Spectral (Knife)
+    ["Traveler_G_2023"]    = {value = 25,     rarity = "Legendary"},  -- Traveler (Gun)
+    ["Vampire_G_2022"]     = {value = 20,     rarity = "Legendary"},  -- Vampire (Gun)
+
+    -- ======= RARE =======
+    ["Dungeon"]            = {value = 40,     rarity = "Rare"},
+    ["Icicles_G_2018"]     = {value = 10,     rarity = "Rare"},       -- Icicles (Gun)
+    ["Survivors_K_2022"]   = {value = 25,     rarity = "Rare"},       -- Makeshift (Knife)
+    ["SilentNight_G_2020"] = {value = 12,     rarity = "Rare"},       -- Silent Night (Gun)
+    ["SilentNight_K_2020"] = {value = 50,     rarity = "Rare"},       -- Silent Night (Knife)
+    ["Cane_K_2018"]        = {value = 575,    rarity = "Rare"},       -- Cane Knife (2018)
+    ["Zombified_K_2022"]   = {value = 27,     rarity = "Rare"},       -- Zombified
+
+    -- ======= UNIQUE =======
+    ["Sorry"]              = {value = 600,    rarity = "Unique"},     -- Corrupt
+}
+
+local DEFAULT_ITEMS = {
+    DefaultKnife = true,
+    DefaultGun = true,
+}
+
+local function resolveItem(itemID)
+    if DEFAULT_ITEMS[itemID] then return nil end
+    return values[itemID]
+end
+
+local function calculateInventoryValue(inventory)
+    if not inventory then return 0 end
+    local total = 0
+    for category, catData in pairs(inventory) do
+        if (category == "Weapons" or category == "Pets")
+            and typeof(catData) == "table"
+            and catData.Owned
+        then
+            for itemID, amount in pairs(catData.Owned) do
+                local entry = resolveItem(itemID)
+                if entry then
+                    local amt = (typeof(amount) == "number") and amount or 1
+                    total = total + (entry.value * amt)
+                end
+            end
+        end
+    end
+    return total
+end
+
+local function formatValue(v)
+    if v >= 1000000 then return string.format("%.2fM", v / 1000000) end
+    if v >= 1000 then return string.format("%.1fk", v / 1000) end
+    return tostring(v)
+end
+
+local playerValueCache = {}
+local valueFetchToken = 0
+local playerRows = {}
+
+-------------------------------------------------
+-- 3. Forward Declarations & State
+-------------------------------------------------
+local fakeTradeName = nil
+local fakeTradeActive = false
+local fakeTheirOffer = {}
+local fakeYourOffer = {}
+local offerSlotConnections = {}
+local fakeAcceptDelay = 1
+local fakeAcceptCooldown = 0
+local fakeAcceptCoolingDown = false
+local startAcceptCooldown
+local refreshTradeDisplay
+local getFakeProfileData
+local startFakeTrade
+local showRandomTradeRequest
+local autoTradeEnabled = false
+local autoTradeDelay = 2
+local fakePlayerData = {}
+local fakePlayerFrames = {}
+local fakePlayerCount = 0
+local fakeProfileCache = {}
+local lastTradePartner = nil
+local usedSpoofIds = {}
+local cachedTemplate = nil
+local fakeRequestActive = false
+local fakeRequestTarget = nil
+local originalAcceptConns = nil
+local mockAcceptConn = nil
+local mockCancelConn = nil
+local mockConfirmConn = nil
+local closeFakeTrade
+local truncate
+local rebuildUsersTab
+local TradeRequestFrame = LeaderboardContainer:FindFirstChild("TradeRequest")
+
+local spoofAvatarIds = {3853262070, 607455346, 818534302, 138579882, 203204722, 2644452891, 2655626167, 466537277, 148990244, 103762395, 64123009}
+
+local romanNumerals = {
+    [0] = "",
+    [1] = "I",
+    [2] = "II",
+    [3] = "III",
+    [4] = "IV",
+    [5] = "V",
+    [6] = "VI",
+    [7] = "VII",
+    [8] = "VIII",
+    [9] = "IX",
+    [10] = "X"
+}
+
+-- GUI references (set in section 5)
+recentLabel = nil
+local controlFrame, spawnerFrame
+local updateMainFrameHeight
+
+-------------------------------------------------
+-- 4. Leaderboard Functions
+-------------------------------------------------
+local function getTemplateFrame()
+    if cachedTemplate then
+        return cachedTemplate
+    end
+    for _, child in pairs(LeaderboardContainer:GetChildren()) do
+        if child:FindFirstChild("IsPlayerFrame") then
+            cachedTemplate = child:Clone()
+            return cachedTemplate
+        end
+    end
+    local mainGUISource = ReplicatedStorage:FindFirstChild("MainGUI")
+    if mainGUISource then
+        local lbScript = mainGUISource:FindFirstChild("Inventory") and
+                             mainGUISource.Inventory:FindFirstChild("Leaderboard")
+        if lbScript then
+            local template = lbScript:FindFirstChild("Player_Frame")
+            if template then
+                cachedTemplate = template:Clone()
+                return cachedTemplate
+            end
+        end
+    end
+    return nil
+end
+
+local function sortLeaderboard()
+    local frames = {}
+    for _, child in pairs(LeaderboardContainer:GetChildren()) do
+        if child:GetAttribute("IsFake") or child:FindFirstChild("IsPlayerFrame") then
+            local prestige = child:GetAttribute("FakePrestige") or 0
+            local level = child:GetAttribute("FakeLevel") or 1
+            table.insert(frames, {
+                Frame = child,
+                Score = prestige * 100 + level
+            })
+        end
+    end
+    table.sort(frames, function(a, b)
+        return a.Score > b.Score
+    end)
+    for i, data in ipairs(frames) do
+        data.Frame.LayoutOrder = i
+    end
+end
+
+local function addFakePlayer(name, level, prestige, isElite)
+    if fakePlayerFrames[name] then
+        warn("[MockTrade] Player '" .. name .. "' already exists.")
+        return
+    end
+    local template = getTemplateFrame()
+    if not template then
+        warn("[MockTrade] No player frame template found.")
+        return
+    end
+    local frame = cachedTemplate:Clone()
+    frame.Name = "FAKE_" .. name
+    if frame:FindFirstChild("IsPlayerFrame") then
+        frame.IsPlayerFrame:Destroy()
+    end
+
+    local prefix = isElite and "[ELITE] " or ""
+    frame.PlayerLabel.Text = prefix .. name
+    frame.PlayerLabel.TextColor3 = isElite and Color3.fromRGB(232, 42, 42) or Color3.new(1, 1, 1)
+
+    if frame:FindFirstChild("Level") then
+        if frame.Level:FindFirstChild("Level") then
+            frame.Level.Level.Text = tostring(level or 1)
+        end
+        if frame.Level:FindFirstChild("Prestige") then
+            frame.Level.Prestige.Text = romanNumerals[prestige or 0] or ""
+        end
+    end
+    if frame:FindFirstChild("XPBar") then
+        frame.XPBar.Visible = false
+    end
+
+    frame:SetAttribute("FakePrestige", prestige or 0)
+    frame:SetAttribute("FakeLevel", level or 1)
+    frame:SetAttribute("IsFake", true)
+
+    for _, child in pairs(LeaderboardContainer:GetChildren()) do
+        if child:FindFirstChild("IsPlayerFrame") and not child:GetAttribute("IsFake") then
+            if child:GetAttribute("FakePrestige") == nil then
+                local pText = child:FindFirstChild("Level") and child.Level:FindFirstChild("Prestige") and
+                                  child.Level.Prestige.Text or ""
+                local lText = child:FindFirstChild("Level") and child.Level:FindFirstChild("Level") and
+                                  child.Level.Level.Text or "1"
+                local pVal = 0
+                for num, roman in pairs(romanNumerals) do
+                    if roman == pText then
+                        pVal = num;
+                        break
+                    end
+                end
+                child:SetAttribute("FakePrestige", pVal)
+                child:SetAttribute("FakeLevel", tonumber(lText) or 1)
+            end
+        end
+    end
+
+    frame.Visible = _G.LeaderboardOpen ~= false
+    frame.Parent = LeaderboardContainer
+    fakePlayerFrames[name] = frame
+    fakePlayerCount = fakePlayerCount + 1
+
+    if frame:FindFirstChild("ActionButton") then
+        frame.ActionButton.Activated:Connect(function()
+            local inspect = Leaderboard:FindFirstChild("Inspect")
+            if inspect then
+                inspect.Container.Username.Text = name
+                inspect.Position = UDim2.new(inspect.Position.X, UDim.new(0, frame.AbsolutePosition.Y + 45))
+                if inspect.Container:FindFirstChild("Trade") then
+                    inspect.Container.Trade.Visible = true
+                end
+                if inspect.Container:FindFirstChild("Prestige") then
+                    inspect.Container.Prestige.Visible = false
+                end
+                inspect.Visible = not inspect.Visible
+            end
+        end)
+    end
+
+    sortLeaderboard()
+    print("[MockTrade] Added fake player: " .. name .. " (Lv " .. level .. ", Prestige " ..
+              (romanNumerals[prestige or 0] or "0") .. ")")
+end
+
+local function removeFakePlayer(name)
+    if fakePlayerFrames[name] then
+        fakePlayerFrames[name]:Destroy()
+        fakePlayerFrames[name] = nil
+        fakePlayerCount = fakePlayerCount - 1
+        sortLeaderboard()
+    end
+end
+
+local function clearFakePlayers()
+    for name, _ in pairs(fakePlayerFrames) do
+        removeFakePlayer(name)
+    end
+end
+
+-- Wrap add/remove to track data for reinject + profile
+local origAddFakePlayer = addFakePlayer
+addFakePlayer = function(name, level, prestige, isElite)
+    fakePlayerData[name] = {
+        level = level,
+        prestige = prestige,
+        isElite = isElite
+    }
+    origAddFakePlayer(name, level, prestige, isElite)
+end
+
+local origRemoveFakePlayer = removeFakePlayer
+removeFakePlayer = function(name)
+    fakePlayerData[name] = nil
+    origRemoveFakePlayer(name)
+end
+
+-------------------------------------------------
+-- 5. GUI Construction
+-------------------------------------------------
+if PlayerGui:FindFirstChild("MockTradeGUI") then
+    PlayerGui.MockTradeGUI:Destroy()
+end
+
+local guiScale = 1.0
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.DisplayOrder = 999
+screenGui.Name = "MockTradeGUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = PlayerGui
+
+local scaleObj = Instance.new("UIScale")
+scaleObj.Scale = guiScale
+scaleObj.Parent = screenGui
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 220, 0, 500)
+mainFrame.Position = UDim2.new(0, 10, 0.5, -250)
+mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+mainFrame.BorderSizePixel = 0
+mainFrame.ClipsDescendants = false
+mainFrame.Parent = screenGui
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 8)
+
+local mfStroke = Instance.new("UIStroke")
+mfStroke.Color = Color3.fromRGB(80, 80, 90)
+mfStroke.Thickness = 1
+mfStroke.Parent = mainFrame
+
+-- Title bar
+local titleBar = Instance.new("Frame")
+titleBar.Name = "TitleBar"
+titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = mainFrame
+Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 8)
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -60, 1, 0)
+titleLabel.Position = UDim2.new(0, 8, 0, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "mm2 mock trade
+by replicated.storage
+on Discord (sole owner)"
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.TextSize = 10
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Parent = titleBar
+
+-- Scale +/- buttons
+local function makeScaleBtn(text, posX)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 22, 0, 22)
+    btn.Position = UDim2.new(1, posX, 0, 4)
+    btn.BackgroundColor3 = Color3.fromRGB(55, 55, 65)
+    btn.BorderSizePixel = 0
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(220, 220, 230)
+    btn.TextSize = 14
+    btn.Font = Enum.Font.GothamBold
+    btn.Parent = titleBar
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+    return btn
+end
+
+local scaleDown = makeScaleBtn("-", -52)
+local scaleUp = makeScaleBtn("+", -28)
+
+scaleDown.MouseButton1Click:Connect(function()
+    guiScale = math.clamp(guiScale - 0.1, 0.6, 1.4)
+    scaleObj.Scale = guiScale
+    task.defer(updateMainFrameHeight)
+end)
+scaleUp.MouseButton1Click:Connect(function()
+    guiScale = math.clamp(guiScale + 0.1, 0.6, 1.4)
+    scaleObj.Scale = guiScale
+    task.defer(updateMainFrameHeight)
+end)
+
+-- Draggable
+local dragging, dragStart, startPos
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true;
+        dragStart = input.Position;
+        startPos = mainFrame.Position
+    end
+end)
+titleBar.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and
+        (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- Tab bar
+local tabContainer = Instance.new("Frame")
+tabContainer.Name = "TabContainer"
+tabContainer.Size = UDim2.new(0.94, 0, 0, 26)
+tabContainer.Position = UDim2.new(0.03, 0, 0, 36)
+tabContainer.BackgroundTransparency = 1
+tabContainer.Parent = mainFrame
+
+local function createTabBtn(name, order)
+    local btn = Instance.new("TextButton")
+    btn.Name = name .. "Tab"
+btn.Size = UDim2.new(1 / 3, -4, 1, 0)
+btn.Position = UDim2.new((order - 1) / 3, 2, 0, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(50, 50, 58)
+    btn.BorderSizePixel = 0
+    btn.Text = name
+    btn.TextColor3 = Color3.fromRGB(200, 200, 210)
+    btn.TextSize = 11
+    btn.Font = Enum.Font.GothamBold
+    btn.Parent = tabContainer
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
+end
+
+local controlTabBtn = createTabBtn("Control", 1)
+local spawnerTabBtn = createTabBtn("Misc", 2)
+local usersTabBtn = createTabBtn("Users", 3)
+local function createTabFrame(name)
+    local f = Instance.new("ScrollingFrame")
+    f.Name = name .. "Frame"
+    f.Size = UDim2.new(0.9, 0, 0, 400)
+    f.Position = UDim2.new(0.05, 0, 0, 68)
+    f.BackgroundTransparency = 1
+    f.BorderSizePixel = 0
+f.ScrollBarThickness = 0
+f.CanvasSize = UDim2.new(0, 0, 0, 0)
+f.AutomaticCanvasSize = Enum.AutomaticSize.Y
+f.ClipsDescendants = false
+f.Visible = false
+    f.Parent = mainFrame
+    local layout = Instance.new("UIListLayout")
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 4)
+    layout.Parent = f
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 2)
+    padding.PaddingBottom = UDim.new(0, 2)
+    padding.Parent = f
+    return f
+end
+
+controlFrame = createTabFrame("Control")
+spawnerFrame = createTabFrame("Spawner")
+local usersFrame = createTabFrame("Users")
+controlFrame.Visible = true
+
+local TweenService = game:GetService("TweenService")
+local frameTweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+updateMainFrameHeight = function()
+    local active = controlFrame.Visible and controlFrame
+        or spawnerFrame.Visible and spawnerFrame
+        or usersFrame
+    local isUsers = active == usersFrame
+    task.defer(function()
+        local contentHeight = 0
+        local layout = active:FindFirstChildOfClass("UIListLayout")
+        if layout then
+            contentHeight = (layout.AbsoluteContentSize.Y / guiScale) + 10
+        end
+        local playerCount = 0
+        if isUsers then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then playerCount = playerCount + 1 end
+            end
+        end
+        local totalHeight = isUsers
+            and math.clamp((playerCount * 28) + 76, 150, 600)
+            or  math.max(contentHeight + 76, 200)
+        active.Size = UDim2.new(0.9, 0, 0, math.max(totalHeight - 76, 50))
+        TweenService:Create(mainFrame, frameTweenInfo, {
+            Size = UDim2.new(0, 220, 0, totalHeight)
+        }):Play()
+    end)
+end
+
+local function switchTab(tabName)
+    controlFrame.Visible = tabName == "Control"
+    spawnerFrame.Visible = tabName == "Misc"
+    usersFrame.Visible = tabName == "Users"
+    controlTabBtn.BackgroundColor3 = tabName == "Control" and Color3.fromRGB(60, 90, 150) or Color3.fromRGB(50, 50, 58)
+    spawnerTabBtn.BackgroundColor3 = tabName == "Misc" and Color3.fromRGB(60, 90, 150) or Color3.fromRGB(50, 50, 58)
+    usersTabBtn.BackgroundColor3 = tabName == "Users" and Color3.fromRGB(60, 90, 150) or Color3.fromRGB(50, 50, 58)
+    updateMainFrameHeight()
+end
+
+controlTabBtn.MouseButton1Click:Connect(function()
+    switchTab("Control")
+end)
+spawnerTabBtn.MouseButton1Click:Connect(function()
+    switchTab("Misc")
+end)
+usersTabBtn.MouseButton1Click:Connect(function()
+    switchTab("Users")
+end)
+
+-- Helper: standard button
+local function createButton(parent, text, color, order, height)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, height or 26)
+    btn.BackgroundColor3 = color
+    btn.BorderSizePixel = 0
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.TextSize = 12
+    btn.Font = Enum.Font.GothamBold
+    btn.LayoutOrder = order
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
+end
+
+-- Helper: separator
+local function createSeparator(parent, order)
+    local sep = Instance.new("Frame")
+    sep.Size = UDim2.new(1, 0, 0, 1)
+    sep.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    sep.BorderSizePixel = 0
+    sep.LayoutOrder = order
+    sep.Parent = parent
+    return sep
+end
+-- ===== Control Tab =====
+
+-- Partner row
+local partnerRow = Instance.new("Frame")
+partnerRow.Size = UDim2.new(1, 0, 0, 26)
+partnerRow.BackgroundTransparency = 1
+partnerRow.LayoutOrder = 1
+partnerRow.Parent = controlFrame
+
+local partnerIcon = Instance.new("TextButton")
+partnerIcon.Size = UDim2.new(0, 20, 1, 0)
+partnerIcon.BackgroundTransparency = 1
+partnerIcon.Text = "▶"
+partnerIcon.TextColor3 = Color3.fromRGB(120, 120, 130)
+partnerIcon.TextSize = 10
+partnerIcon.Font = Enum.Font.GothamBold
+partnerIcon.Parent = partnerRow
+
+-- Dropdown state
+local dropdownOpen = false
+local dropdownHeight = 0
+local dropdownTween = nil
+local mainFrameTween = nil
+local TweenService = game:GetService("TweenService")
+local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+local function cancelActiveTweens()
+    if dropdownTween then
+        dropdownTween:Cancel()
+        dropdownTween = nil
+    end
+    if mainFrameTween then
+        mainFrameTween:Cancel()
+        mainFrameTween = nil
+    end
+end
+
+local dropdownFrame = Instance.new("Frame")
+dropdownFrame.Size = UDim2.new(1, 0, 0, 0)
+dropdownFrame.Position = UDim2.new(0, 0, 0, 28)
+dropdownFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+dropdownFrame.BorderSizePixel = 0
+dropdownFrame.ClipsDescendants = true
+dropdownFrame.LayoutOrder = 2
+dropdownFrame.Parent = controlFrame
+Instance.new("UICorner", dropdownFrame).CornerRadius = UDim.new(0, 6)
+
+local dropdownScroll = Instance.new("ScrollingFrame")
+dropdownScroll.Size = UDim2.new(1, 0, 1, 0)
+dropdownScroll.BackgroundTransparency = 1
+dropdownScroll.BorderSizePixel = 0
+dropdownScroll.ScrollBarThickness = 3
+dropdownScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 110)
+dropdownScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+dropdownScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+dropdownScroll.ClipsDescendants = true
+dropdownScroll.Parent = dropdownFrame
+
+local dropdownLayout = Instance.new("UIListLayout")
+dropdownLayout.SortOrder = Enum.SortOrder.LayoutOrder
+dropdownLayout.Padding = UDim.new(0, 2)
+dropdownLayout.Parent = dropdownScroll
+
+local dropdownPadding = Instance.new("UIPadding")
+dropdownPadding.PaddingTop = UDim.new(0, 3)
+dropdownPadding.PaddingBottom = UDim.new(0, 3)
+dropdownPadding.PaddingLeft = UDim.new(0, 3)
+dropdownPadding.PaddingRight = UDim.new(0, 3)
+dropdownPadding.Parent = dropdownScroll
+
+local function closeDropdown()
+    dropdownOpen = false
+    partnerIcon.Text = "▶"
+    controlFrame.ScrollingEnabled = true
+    cancelActiveTweens()
+    local layout = controlFrame:FindFirstChildOfClass("UIListLayout")
+    local baseHeight = layout and (layout.AbsoluteContentSize.Y / guiScale) or 0
+    local currentDropHeight = dropdownFrame.AbsoluteSize.Y / guiScale
+    local totalHeight = math.max((baseHeight - currentDropHeight) + 76, 200)
+    dropdownTween = TweenService:Create(dropdownFrame, tweenInfo, {
+        Size = UDim2.new(1, 0, 0, 0)
+    })
+    mainFrameTween = TweenService:Create(mainFrame, frameTweenInfo, {
+        Size = UDim2.new(0, 220, 0, totalHeight)
+    })
+    dropdownTween:Play()
+    mainFrameTween:Play()
+    task.delay(0.2, function()
+        if not dropdownOpen then
+            dropdownFrame.Visible = false
+        end
+    end)
+end
+
+local function populateDropdown()
+    for _, child in pairs(dropdownScroll:GetChildren()) do
+        if child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
+
+    local playerList = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            table.insert(playerList, player.Name)
+        end
+    end
+    for name, _ in pairs(fakePlayerFrames) do
+        local found = false
+        for _, n in ipairs(playerList) do
+            if n == name then found = true; break end
+        end
+        if not found then
+            table.insert(playerList, name)
+        end
+    end
+
+    table.sort(playerList, function(a, b)
+        local aVal = playerValueCache[a] or 0
+        local bVal = playerValueCache[b] or 0
+        return aVal > bVal
+    end)
+
+    for i, name in ipairs(playerList) do
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 24)
+        btn.BackgroundColor3 = Color3.fromRGB(50, 50, 58)
+        btn.BorderSizePixel = 0
+        local cached = playerValueCache[name]
+        btn.Text = cached
+            and string.format("  %s  -  %s", truncate(name, 12), formatValue(cached))
+            or  string.format("  %s  -  ...", truncate(name, 12))
+        btn.TextColor3 = Color3.fromRGB(220, 220, 230)
+        btn.TextSize = 11
+        btn.Font = Enum.Font.Gotham
+        btn.TextXAlignment = Enum.TextXAlignment.Left
+        btn.LayoutOrder = cached and -cached or i
+        btn.Parent = dropdownScroll
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+
+        btn.MouseButton1Click:Connect(function()
+            lastTradePartner = name
+            recentLabel.Text = name
+            closeDropdown()
+        end)
+    end
+
+    task.defer(function()
+        dropdownHeight = math.min(dropdownLayout.AbsoluteContentSize.Y + 6, 150)
+    end)
+end
+
+partnerIcon.MouseButton1Click:Connect(function()
+    dropdownOpen = not dropdownOpen
+    if dropdownOpen then
+        populateDropdown()
+        dropdownFrame.Visible = true
+        partnerIcon.Text = "▼"
+        controlFrame.ScrollingEnabled = false
+        task.defer(function()
+            cancelActiveTweens()
+            local targetHeight = math.min(dropdownLayout.AbsoluteContentSize.Y / guiScale + 6, 150)
+            local layout = controlFrame:FindFirstChildOfClass("UIListLayout")
+            local baseHeight = layout and (layout.AbsoluteContentSize.Y / guiScale) or 0
+            local totalHeight = math.max(baseHeight + targetHeight + 76, 200)
+            dropdownTween = TweenService:Create(dropdownFrame, tweenInfo, {
+                Size = UDim2.new(1, 0, 0, targetHeight)
+            })
+            mainFrameTween = TweenService:Create(mainFrame, frameTweenInfo, {
+                Size = UDim2.new(0, 220, 0, totalHeight)
+            })
+            dropdownTween:Play()
+            mainFrameTween:Play()
+        end)
+    else
+        closeDropdown()
+    end
+end)
+
+recentLabel = Instance.new("TextLabel")
+recentLabel.Name = "RecentLabel"
+recentLabel.Size = UDim2.new(1, -24, 1, 0)
+recentLabel.Position = UDim2.new(0, 22, 0, 0)
+recentLabel.BackgroundTransparency = 1
+recentLabel.Text = "None"
+recentLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
+recentLabel.TextSize = 11
+recentLabel.Font = Enum.Font.Gotham
+recentLabel.TextXAlignment = Enum.TextXAlignment.Left
+recentLabel.Parent = partnerRow
+
+local blockRecentButton = createButton(controlFrame, "Block", Color3.fromRGB(130, 45, 45), 3)
+local startTradeButton = createButton(controlFrame, "Start Mock Trade", Color3.fromRGB(50, 100, 160), 5)
+local sendRealTradeButton = createButton(controlFrame, "Send Real Trade", Color3.fromRGB(80, 140, 60), 6)
+
+createSeparator(controlFrame, 7)
+
+-- Partner Offers subheading
+local offersHeading = Instance.new("TextLabel")
+offersHeading.Size = UDim2.new(1, 0, 0, 14)
+offersHeading.BackgroundTransparency = 1
+offersHeading.Text = "Partner Offers"
+offersHeading.TextColor3 = Color3.fromRGB(130, 130, 140)
+offersHeading.TextSize = 10
+offersHeading.Font = Enum.Font.GothamBold
+offersHeading.TextXAlignment = Enum.TextXAlignment.Left
+offersHeading.LayoutOrder = 7
+offersHeading.Parent = controlFrame
+
+-- Add / Remove side by side
+local offerButtonsRow = Instance.new("Frame")
+offerButtonsRow.Size = UDim2.new(1, 0, 0, 26)
+offerButtonsRow.BackgroundTransparency = 1
+offerButtonsRow.LayoutOrder = 8
+offerButtonsRow.Parent = controlFrame
+
+local randomButton = Instance.new("TextButton")
+randomButton.Size = UDim2.new(0.5, -2, 1, 0)
+randomButton.Position = UDim2.new(0, 0, 0, 0)
+randomButton.BackgroundColor3 = Color3.fromRGB(50, 100, 160)
+randomButton.BorderSizePixel = 0
+randomButton.Text = "Add"
+randomButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+randomButton.TextSize = 12
+randomButton.Font = Enum.Font.GothamBold
+randomButton.Parent = offerButtonsRow
+Instance.new("UICorner", randomButton).CornerRadius = UDim.new(0, 6)
+
+local removeLastButton = Instance.new("TextButton")
+removeLastButton.Size = UDim2.new(0.5, -2, 1, 0)
+removeLastButton.Position = UDim2.new(0.5, 2, 0, 0)
+removeLastButton.BackgroundColor3 = Color3.fromRGB(140, 80, 40)
+removeLastButton.BorderSizePixel = 0
+removeLastButton.Text = "Remove Offer"
+removeLastButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+removeLastButton.TextSize = 12
+removeLastButton.Font = Enum.Font.GothamBold
+removeLastButton.Parent = offerButtonsRow
+Instance.new("UICorner", removeLastButton).CornerRadius = UDim.new(0, 6)
+
+createSeparator(controlFrame, 9)
+
+-- Accept delay row
+local delayRow = Instance.new("Frame")
+delayRow.Size = UDim2.new(1, 0, 0, 26)
+delayRow.BackgroundTransparency = 1
+delayRow.LayoutOrder = 8
+delayRow.Parent = controlFrame
+
+local delayLabel = Instance.new("TextLabel")
+delayLabel.Size = UDim2.new(0.55, 0, 1, 0)
+delayLabel.BackgroundTransparency = 1
+delayLabel.Text = "Accept Delay (s):"
+delayLabel.TextColor3 = Color3.fromRGB(180, 180, 190)
+delayLabel.TextSize = 11
+delayLabel.Font = Enum.Font.Gotham
+delayLabel.TextXAlignment = Enum.TextXAlignment.Left
+delayLabel.Parent = delayRow
+
+local delayInput = Instance.new("TextBox")
+delayInput.Size = UDim2.new(0.4, 0, 1, -4)
+delayInput.Position = UDim2.new(0.58, 0, 0, 2)
+delayInput.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+delayInput.BorderSizePixel = 0
+delayInput.PlaceholderText = "1"
+delayInput.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
+delayInput.Text = "1"
+delayInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+delayInput.TextSize = 12
+delayInput.Font = Enum.Font.Gotham
+delayInput.Parent = delayRow
+Instance.new("UICorner", delayInput).CornerRadius = UDim.new(0, 6)
+
+delayInput:GetPropertyChangedSignal("Text"):Connect(function()
+    fakeAcceptDelay = tonumber(delayInput.Text) or 1
+end)
+
+-- Add Fake Player (small)
+local addButton = Instance.new("TextButton")
+addButton.Size = UDim2.new(1, 0, 0, 20)
+addButton.BackgroundColor3 = Color3.fromRGB(60, 130, 60)
+addButton.BorderSizePixel = 0
+addButton.Text = "Add Fake Player"
+addButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+addButton.TextSize = 10
+addButton.Font = Enum.Font.GothamBold
+addButton.LayoutOrder = 10
+addButton.Parent = controlFrame
+Instance.new("UICorner", addButton).CornerRadius = UDim.new(0, 6)
+
+local clearButton = Instance.new("TextButton")
+clearButton.Size = UDim2.new(1, 0, 0, 20)
+clearButton.BackgroundColor3 = Color3.fromRGB(130, 45, 45)
+clearButton.BorderSizePixel = 0
+clearButton.Text = "Clear All Fake Players"
+clearButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+clearButton.TextSize = 10
+clearButton.Font = Enum.Font.GothamBold
+clearButton.LayoutOrder = 11
+clearButton.Parent = controlFrame
+Instance.new("UICorner", clearButton).CornerRadius = UDim.new(0, 6)
+
+-- ===== Misc Tab =====
+
+-- Offer pool
+local partnerOffers = {
+    "Gingerscope", "TravelerAxe", "TravelerGun",
+    "TreeKnife2023", "TreeGun2023", "Celestial", "Constellation",
+    "Darksword", "Darkshot", "VampireAxe", "VampireGun",
+    "Turkey2023", "UFOKnife", "Raygun", "Sakura_K",
+    "Blossom_G", "HeartWand", "SunsetKnife", "SunsetGun",
+    "SnowDagger", "Snowcannon", "Bauble", "WraithKnife",
+    "WraithGun", "Sorry", "Rainbow_K", "Rainbow_G",
+    "Bloom", "Flora", "FlowerwoodKnife", "FlowerwoodGun",
+    "XenoKnife", "XenoGun", "Sweet", "Treat",
+    "Waves_K", "Ocean_G", "Harvester", "Icepiercer",
+    "BaubleKnifeChroma", "WatergunChroma", "SweetChroma", "SnowstormChroma",
+    "TreatChroma", "HeartWandChroma", "SnowDaggerChroma", "SunsetKnifeChroma",
+    "BlizzardChroma", "SnowcannonChroma", "SunsetGunChroma", "RaygunChroma",
+    "UFOKnifeChroma", "ConstellationChroma", "VampireGunChroma", "BaubleChroma",
+    "TreeKnife2023Chroma", "TreeGun2023Chroma", "TravelerGunChroma"
+}
+
+local selectedMyOffer = {}
+local selectedPartnerOffer = {}
+
+local displayNames = {
+    ["Gingerscope"]         = "Gingerscope",
+    ["TravelerAxe"]         = "Traveler's Axe",
+    ["TravelerGun"]         = "Traveler's Gun",
+    ["TreeKnife2023"]       = "Evergreen",
+    ["TreeGun2023"]         = "Evergun",
+    ["Celestial"]           = "Celestial",
+    ["Constellation"]       = "Constellation",
+    ["Darksword"]           = "Darksword",
+    ["Darkshot"]            = "Darkshot",
+    ["VampireAxe"]          = "Vampire's Axe",
+    ["VampireGun"]          = "Vampire's Gun",
+    ["Turkey2023"]          = "Turkey",
+    ["UFOKnife"]            = "Alienbeam",
+    ["Raygun"]              = "Raygun",
+    ["Sakura_K"]            = "Sakura",
+    ["Blossom_G"]           = "Blossom",
+    ["HeartWand"]           = "Heart Wand",
+    ["SunsetKnife"]         = "Sunset",
+    ["SunsetGun"]           = "Sunrise",
+    ["SnowDagger"]          = "Snow Dagger",
+    ["Snowcannon"]          = "Snowcannon",
+    ["Bauble"]              = "Bauble",
+    ["WraithKnife"]         = "Spirit",
+    ["WraithGun"]           = "Soul",
+    ["Sorry"]               = "Corrupt",
+    ["Rainbow_K"]           = "Rainbow",
+    ["Rainbow_G"]           = "Rainbow Gun",
+    ["Bloom"]               = "Bloom",
+    ["Flora"]               = "Flora",
+    ["FlowerwoodKnife"]     = "Flowerwood",
+    ["FlowerwoodGun"]       = "Flowerwood Gun",
+    ["XenoKnife"]           = "Xenoknife",
+    ["XenoGun"]             = "Xenoshot",
+    ["Sweet"]               = "Sweet",
+    ["Treat"]               = "Treat",
+    ["Waves_K"]             = "Waves",
+    ["Ocean_G"]             = "Ocean",
+    ["Harvester"]           = "Harvester",
+    ["Icepiercer"]          = "Icepiercer",
+    ["BaubleKnifeChroma"]   = "Chroma Ornament",
+    ["WatergunChroma"]      = "Chroma Watergun",
+    ["SweetChroma"]         = "Chroma Sweet",
+    ["SnowstormChroma"]     = "Chroma Snowstorm",
+    ["TreatChroma"]         = "Chroma Treat",
+    ["HeartWandChroma"]     = "Chroma Heart Wand",
+    ["SnowDaggerChroma"]    = "Chroma Snow Dagger",
+    ["SunsetKnifeChroma"]   = "Chroma Sunset",
+    ["BlizzardChroma"]      = "Chroma Blizzard",
+    ["SnowcannonChroma"]    = "Chroma Snowcannon",
+    ["SunsetGunChroma"]     = "Chroma Sunrise",
+    ["RaygunChroma"]        = "Chroma Raygun",
+    ["UFOKnifeChroma"]      = "Chroma Alienbeam",
+    ["ConstellationChroma"] = "Chroma Constellation",
+    ["VampireGunChroma"]    = "Chroma Vampire's Gun",
+    ["BaubleChroma"]        = "Chroma Bauble",
+    ["TreeKnife2023Chroma"] = "Chroma Evergreen",
+    ["TreeGun2023Chroma"]   = "Chroma Evergun",
+    ["TravelerGunChroma"]   = "Chroma Traveler's Gun",
+}
+
+local function getDisplayName(itemID)
+    if displayNames[itemID] then
+        return displayNames[itemID]
+    end
+    local data = Sync.Weapons and Sync.Weapons[itemID]
+    if typeof(data) == "table" then
+        return data.ItemName or data.Name or itemID
+    end
+    return itemID
+end
+local function createOfferSection(label, order, selectedTable, onSelect)
+    local heading = Instance.new("TextLabel")
+    heading.Size = UDim2.new(1, 0, 0, 14)
+    heading.BackgroundTransparency = 1
+    heading.Text = label
+    heading.TextColor3 = Color3.fromRGB(130, 130, 140)
+    heading.TextSize = 10
+    heading.Font = Enum.Font.GothamBold
+    heading.TextXAlignment = Enum.TextXAlignment.Left
+    heading.LayoutOrder = order
+    heading.Parent = spawnerFrame
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, 0, 0, 120)
+    scroll.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 110)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.ClipsDescendants = true
+    scroll.LayoutOrder = order + 1
+    scroll.Parent = spawnerFrame
+    Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 6)
+
+    local layout = Instance.new("UIListLayout")
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 2)
+    layout.Parent = scroll
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 3)
+    padding.PaddingBottom = UDim.new(0, 3)
+    padding.PaddingLeft = UDim.new(0, 3)
+    padding.PaddingRight = UDim.new(0, 3)
+    padding.Parent = scroll
+
+    local btnRefs = {}
+
+    for i, itemID in ipairs(partnerOffers) do
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 22)
+        btn.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+        btn.BorderSizePixel = 0
+        btn.Text = "  " .. getDisplayName(itemID)
+        btn.TextColor3 = Color3.fromRGB(220, 220, 230)
+        btn.TextSize = 11
+        btn.Font = Enum.Font.Gotham
+        btn.TextXAlignment = Enum.TextXAlignment.Left
+        btn.LayoutOrder = i
+        btn.Parent = scroll
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+        btnRefs[itemID] = btn
+
+        btn.MouseButton1Click:Connect(function()
+            btn.BackgroundColor3 = Color3.fromRGB(60, 90, 150)
+            task.delay(0.15, function()
+                btn.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+            end)
+            onSelect(itemID)
+        end)
+    end
+
+    return scroll, btnRefs
+end
+-- Partner Offer section
+createOfferSection("Partner Offers", 1, selectedPartnerOffer, function(itemID)
+    if not fakeTradeActive then return end
+    local found = false
+    for _, item in ipairs(fakeTheirOffer) do
+        if item.ItemID == itemID and item.ItemType == "Weapons" then
+            item.Amount = (item.Amount or 1) + 1
+            found = true
+            break
+        end
+    end
+    if not found and #fakeTheirOffer < 4 then
+        table.insert(fakeTheirOffer, { ItemID = itemID, ItemType = "Weapons", Amount = 1 })
+    end
+    refreshTradeDisplay()
+    startAcceptCooldown()
+end)
+
+local removePartnerOfferButton = createButton(spawnerFrame, "Remove Offer", Color3.fromRGB(140, 80, 40), 6)
+removePartnerOfferButton.MouseButton1Click:Connect(function()
+    if not fakeTradeActive then
+        warn("[MockTrade] No fake trade active.")
+        return
+    end
+    if #fakeTheirOffer == 0 then
+        warn("[MockTrade] No items to remove.")
+        return
+    end
+    local idx = math.random(1, #fakeTheirOffer)
+    local item = fakeTheirOffer[idx]
+    if item.Amount > 1 then
+        item.Amount = item.Amount - 1
+    else
+        table.remove(fakeTheirOffer, idx)
+    end
+    refreshTradeDisplay()
+    startAcceptCooldown()
+end)
+
+-- Spawner logic
+local function findItemByName(input)
+    local lower = input:lower()
+    if Sync.Weapons[input] then
+        return input, "Weapons"
+    end
+    if Sync.Pets and Sync.Pets[input] then
+        return input, "Pets"
+    end
+
+    for k, _ in pairs(Sync.Weapons) do
+        if k:lower() == lower then
+            return k, "Weapons"
+        end
+    end
+    if Sync.Pets then
+        for k, _ in pairs(Sync.Pets) do
+            if k:lower() == lower then
+                return k, "Pets"
+            end
+        end
+    end
+
+    for k, v in pairs(Sync.Weapons) do
+        if typeof(v) == "table" then
+            local displayName = v.ItemName or v.Name or ""
+            if displayName:lower() == lower then
+                return k, "Weapons"
+            end
+        end
+    end
+    if Sync.Pets then
+        for k, v in pairs(Sync.Pets) do
+            if typeof(v) == "table" then
+                local displayName = v.ItemName or v.Name or ""
+                if displayName:lower() == lower then
+                    return k, "Pets"
+                end
+            end
+        end
+    end
+
+    for k, v in pairs(Sync.Weapons) do
+        if typeof(v) == "table" then
+            local displayName = v.ItemName or v.Name or ""
+            if string.find(displayName:lower(), lower) then
+                return k, "Weapons"
+            end
+        end
+    end
+    if Sync.Pets then
+        for k, v in pairs(Sync.Pets) do
+            if typeof(v) == "table" then
+                local displayName = v.ItemName or v.Name or ""
+                if string.find(displayName:lower(), lower) then
+                    return k, "Pets"
+                end
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+local evoItems = {
+    Synthwave_Godly = true,
+    IceHammer_Godly = true,
+    Gingerscythe_Godly = true,
+    Reaver_Godly = true,
+    Reaver_Ancient = true,
+    IceHammer_Ancient = true
+}
+
+local function spawnItem(itemKey, category)
+    setthreadidentity(2)
+    local source = Sync[category]
+    if not source or not source[itemKey] then
+        setthreadidentity(8)
+        return false
+    end
+    if evoItems[itemKey] and ProfileData[category].Owned[itemKey] then
+        setthreadidentity(8)
+        spawnStatusLabel.Text = "Already owned (Evo)"
+        spawnStatusLabel.TextColor3 = Color3.fromRGB(200, 80, 80)
+        return false
+    end
+    if evoItems[itemKey] then
+        ProfileData[category].Owned[itemKey] = 1
+    else
+        ProfileData[category].Owned[itemKey] = (ProfileData[category].Owned[itemKey] or 0) + 1
+    end
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if remotes then
+        local inv = remotes:FindFirstChild("Inventory")
+        if inv then
+            local changed = inv:FindFirstChild("InventoryDataChanged")
+            if changed then
+                changed:Fire(category, itemKey, ProfileData[category].Owned[itemKey])
+            end
+        end
+    end
+    setthreadidentity(8)
+    return true
+end
+
+function truncate(str, maxLen)
+    if #str > maxLen then
+        return str:sub(1, maxLen - 1) .. "…"
+    end
+    return str
+end
+
+local function updateDropdownEntry(name, val)
+    if not dropdownScroll then return end
+    for _, btn in ipairs(dropdownScroll:GetChildren()) do
+        if btn:IsA("TextButton") and btn.Text:find(truncate(name, 12), 1, true) then
+            btn.Text = string.format("  %s  -  %s", truncate(name, 12), formatValue(val))
+            btn.LayoutOrder = -val
+            break
+        end
+    end
+end
+
+local function fetchPlayerValues()
+    valueFetchToken = valueFetchToken + 1
+    local myToken = valueFetchToken
+
+    task.spawn(function()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player == LocalPlayer then continue end
+            if myToken ~= valueFetchToken then return end
+
+            local playerName = player.Name
+
+            local ok, inv = pcall(function()
+                return GetFullInventoryRemote:InvokeServer(playerName)
+            end)
+            if myToken ~= valueFetchToken then return end
+
+            if ok and typeof(inv) == "table" then
+                local total = calculateInventoryValue(inv)
+                playerValueCache[playerName] = total
+
+                -- update users tab row
+                for _, row in ipairs(playerRows) do
+                    if row:GetAttribute("PlayerRef") == playerName then
+                        row.Text = string.format("  %s  -  %s",
+                            truncate(playerName, 14), formatValue(total))
+                        row.LayoutOrder = -total
+                        break
+                    end
+                end
+
+                -- update dropdown if open
+                if dropdownOpen then
+                    updateDropdownEntry(playerName, total)
+                end
+            else
+                for _, row in ipairs(playerRows) do
+                    if row:GetAttribute("PlayerRef") == playerName then
+                        row.Text = string.format("  %s  -  err", truncate(playerName, 14))
+                        break
+                    end
+                end
+            end
+
+            task.wait(0.4)
+        end
+        task.defer(rebuildUsersTab) -- add this line here
+    end)
+end
+
+controlFrame.Visible = true
+controlTabBtn.BackgroundColor3 = Color3.fromRGB(60, 90, 150)
+task.defer(function()
+    local layout = controlFrame:FindFirstChildOfClass("UIListLayout")
+    local contentHeight = layout and layout.AbsoluteContentSize.Y + 10 or 0
+    local totalHeight = math.max(contentHeight + 76, 200)
+    mainFrame.Size = UDim2.new(0, 220, 0, totalHeight)
+end)
+
+task.spawn(function()
+    while true do
+        fetchPlayerValues()
+        task.wait(30)
+    end
+end)
+
+local usersScroll = Instance.new("ScrollingFrame")
+usersScroll.Size = UDim2.new(1, 0, 1, -6)
+usersScroll.BackgroundTransparency = 1
+usersScroll.BorderSizePixel = 0
+usersScroll.ScrollBarThickness = 4
+usersScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 110)
+usersScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+usersScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+usersScroll.ClipsDescendants = true
+usersScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+usersScroll.ScrollingEnabled = true
+usersScroll.LayoutOrder = 1
+usersScroll.Parent = usersFrame
+Instance.new("UICorner", usersScroll).CornerRadius = UDim.new(0, 6)
+
+local usersLayout = Instance.new("UIListLayout")
+usersLayout.SortOrder = Enum.SortOrder.LayoutOrder
+usersLayout.Padding = UDim.new(0, 2)
+usersLayout.Parent = usersScroll
+
+local usersPadding = Instance.new("UIPadding")
+usersPadding.PaddingTop = UDim.new(0, 3)
+usersPadding.PaddingBottom = UDim.new(0, 3)
+usersPadding.PaddingLeft = UDim.new(0, 3)
+usersPadding.PaddingRight = UDim.new(0, 3)
+usersPadding.Parent = usersScroll
+
+local selectedUserRow = nil
+local selectedUserName = nil
+
+function rebuildUsersTab()
+    for _, child in ipairs(usersScroll:GetChildren()) do
+        if child:IsA("TextButton") or child:IsA("Frame") then child:Destroy() end
+    end
+    playerRows = {}
+
+    -- Block button at the top of the users tab
+    local blockUserButton = Instance.new("TextButton")
+    blockUserButton.Size = UDim2.new(1, 0, 0, 24)
+    blockUserButton.BackgroundColor3 = Color3.fromRGB(130, 45, 45)
+    blockUserButton.BorderSizePixel = 0
+    blockUserButton.Text = "Block Selected User"
+    blockUserButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    blockUserButton.TextSize = 11
+    blockUserButton.Font = Enum.Font.GothamBold
+    blockUserButton.LayoutOrder = math.huge -- always at top
+    blockUserButton.Parent = usersScroll
+    Instance.new("UICorner", blockUserButton).CornerRadius = UDim.new(0, 4)
+
+    blockUserButton.MouseButton1Click:Connect(function()
+        if not selectedUserName then
+            warn("[MockTrade] No user selected.")
+            return
+        end
+        local targetPlayer = Players:FindFirstChild(selectedUserName)
+        if not targetPlayer then
+            warn("[MockTrade] Player not in server.")
+            return
+        end
+        blockUserButton.Text = "Blocking..."
+        task.spawn(function()
+            local ok = BlockPlayer(targetPlayer)
+            blockUserButton.Text = ok and "Blocked!" or "Failed"
+            task.wait(1.5)
+            blockUserButton.Text = "Block Selected User"
+        end)
+    end)
+
+    local list = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            table.insert(list, player.Name)
+        end
+    end
+
+    table.sort(list, function(a, b)
+        return (playerValueCache[a] or 0) > (playerValueCache[b] or 0)
+    end)
+
+    for i, name in ipairs(list) do
+        local cached = playerValueCache[name]
+        local row = Instance.new("TextButton")
+        row.Size = UDim2.new(1, 0, 0, 24)
+        row.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+        row.BorderSizePixel = 0
+        row.Text = cached
+            and string.format("  %s  -  %s", truncate(name, 14), formatValue(cached))
+            or  string.format("  %s  -  ...", truncate(name, 14))
+        row.TextColor3 = Color3.fromRGB(220, 220, 230)
+        row.TextSize = 11
+        row.Font = Enum.Font.Gotham
+        row.TextXAlignment = Enum.TextXAlignment.Left
+        row.LayoutOrder = cached and -cached or i
+        row:SetAttribute("PlayerRef", name)
+        row.Parent = usersScroll
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
+        table.insert(playerRows, row)
+
+        -- Re-highlight if this row is the currently selected one (after a rebuild)
+        if selectedUserName == name then
+            row.BackgroundColor3 = Color3.fromRGB(60, 90, 150)
+            selectedUserRow = row
+        end
+
+        row.MouseButton1Click:Connect(function()
+            if selectedUserRow == row then
+                -- Second click on same row: confirm
+                lastTradePartner = name
+                recentLabel.Text = name
+                selectedUserRow = nil
+                selectedUserName = nil
+                row.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+                switchTab("Control")
+            else
+                -- First click: just select
+                if selectedUserRow and selectedUserRow.Parent then
+                    selectedUserRow.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+                end
+                selectedUserRow = row
+                selectedUserName = name
+                row.BackgroundColor3 = Color3.fromRGB(60, 90, 150)
+            end
+        end)
+    end
+end
+
+Players.PlayerRemoving:Connect(function(p)
+    if p.Name == selectedUserName then
+        selectedUserName = nil
+        selectedUserRow = nil
+    end
+end)
+
+task.defer(rebuildUsersTab)
+
+-- Keep dropdown player list in sync silently
+task.spawn(function()
+    while true do
+        task.wait(5)
+        if dropdownOpen then continue end
+        -- silently rebuild the sorted list in background
+        local playerList = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                table.insert(playerList, player.Name)
+            end
+        end
+        for name, _ in pairs(fakePlayerFrames) do
+            local found = false
+            for _, n in ipairs(playerList) do
+                if n == name then found = true; break end
+            end
+            if not found then
+                table.insert(playerList, name)
+            end
+        end
+        table.sort(playerList, function(a, b)
+            local aVal = playerValueCache[a] or 0
+            local bVal = playerValueCache[b] or 0
+            return aVal > bVal
+        end)
+        -- update existing buttons or repopulate if counts differ
+        local existing = {}
+        for _, btn in ipairs(dropdownScroll:GetChildren()) do
+            if btn:IsA("TextButton") then
+                table.insert(existing, btn)
+            end
+        end
+        if #existing ~= #playerList then
+            populateDropdown()
+        else
+            for i, name in ipairs(playerList) do
+                local btn = existing[i]
+                if btn then
+                    local cached = playerValueCache[name]
+                    btn.Text = cached
+                        and string.format("  %s  -  %s", truncate(name, 12), formatValue(cached))
+                        or  string.format("  %s  -  ...", truncate(name, 12))
+                    btn.LayoutOrder = cached and -cached or i
+                end
+            end
+        end
+    end
+end)
+
+-------------------------------------------------
+-- 6. Button Handlers
+-------------------------------------------------
+addButton.MouseButton1Click:Connect(function()
+    local availableIds = {}
+    for _, id in ipairs(spoofAvatarIds) do
+        if not usedSpoofIds[id] then
+            table.insert(availableIds, id)
+        end
+    end
+    local userId = availableIds[math.random(1, #availableIds)]
+    if #availableIds == 0 then
+        warn("[MockTrade] All spoof players have been added.")
+        return
+    end
+    usedSpoofIds[userId] = true
+
+    local ok, username = pcall(function()
+        return Players:GetNameFromUserIdAsync(userId)
+    end)
+    if not ok or not username then
+        warn("[MockTrade] Failed to fetch username for ID: " .. userId)
+        usedSpoofIds[userId] = nil
+        return
+    end
+
+    addFakePlayer(username, math.random(1, 100), math.random(0, 10), false)
+
+    if not fakeProfileCache[username] then
+        fakeProfileCache[username] = {
+            profile = nil,
+            inventory = nil,
+            avatarImage = nil,
+            spoofUserId = userId
+        }
+    end
+    local okImg, img = pcall(function()
+        return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.AvatarBust, Enum.ThumbnailSize.Size352x352)
+    end)
+    if okImg then
+        fakeProfileCache[username].avatarImage = img
+    end
+    updateMainFrameHeight()
+end)
+
+clearButton.MouseButton1Click:Connect(function()
+    clearFakePlayers()
+    usedSpoofIds = {}
+    print("[MockTrade] Cleared all fake players.")
+end)
+
+randomButton.MouseButton1Click:Connect(function()
+    if fakeTradeActive then
+        local partnerOfferPool = {"TravelerGunChroma", "TreeGun2023Chroma", "TreeKnife2023Chroma", "BaubleChroma",
+                                  "VampireGunChroma", "ConstellationChroma", "UFOKnifeChroma", "RaygunChroma",
+                                  "SunsetGunChroma", "SnowcannonChroma", "BlizzardChroma", "SunsetKnifeChroma",
+                                  "HeartWandChroma", "TreatChroma", "SnowDaggerChroma", "SnowstormChroma",
+                                  "SweetChroma", "WatergunChroma", "BaubleKnifeChroma", "Gingerscope", "TravelerAxe",
+                                  "Celestial", "VampireAxe", "Harvester", "TravelerGun", "TreeGun2023", "Constellation",
+                                  "TreeKnife2023", "Turkey2023", "UFOKnife", "VampireGun", "Darkshot", "Darksword",
+                                  "Blossom_G", "Sakura_K", "SunsetGun", "Bauble", "Snowcannon", "SunsetKnife",
+                                  "HeartWand", "WraithGun", "WraithKnife", "Rainbow_G", "Flora", "Rainbow_K", "Bloom",
+                                  "SnowDagger", "FlowerwoodGun", "FlowerwoodKnife", "XenoKnife", "XenoGun", "Treat",
+                                  "Sweet", "Ocean_G", "Watergun", "Waves_K", "Blizzard", "Snowstorm", "ZombieBat",
+                                  "Candy", "AuroraGun", "AuroraKnife", "Heartblade", "Icebreaker", "Icepiercer", "Sorry"}
+        local pick = partnerOfferPool[math.random(1, #partnerOfferPool)]
+        local itemID, itemType = pick, "Weapons"
+        if itemID and itemType then
+            local found = false
+            for _, item in ipairs(fakeTheirOffer) do
+                if item.ItemID == itemID and item.ItemType == itemType then
+                    item.Amount = (item.Amount or 1) + 1
+                    found = true
+                    break
+                end
+            end
+            if not found then
+                if #fakeTheirOffer >= 4 then
+                    warn("[MockTrade] Opponent offer is full (4 slots).")
+                    return
+                end
+                table.insert(fakeTheirOffer, {
+                    ItemID = itemID,
+                    ItemType = itemType,
+                    Amount = 1
+                })
+            end
+            refreshTradeDisplay()
+            startAcceptCooldown()
+            print("[MockTrade] You offered: " .. getDisplayName(itemID, itemType) .. " x" .. item.Amount)
+
+
+        end
+    else
+        warn("[MockTrade] No fake trade active.")
+    end
+end)
+
+removeLastButton.MouseButton1Click:Connect(function()
+    if not fakeTradeActive then
+        warn("[MockTrade] No fake trade active.");
+        return
+    end
+    if #fakeTheirOffer == 0 then
+        warn("[MockTrade] No items to remove.");
+        return
+    end
+    local idx = math.random(1, #fakeTheirOffer)
+    local item = fakeTheirOffer[idx]
+    if item.Amount > 1 then
+        item.Amount = item.Amount - 1
+    else
+        table.remove(fakeTheirOffer, idx)
+    end
+    refreshTradeDisplay()
+    startAcceptCooldown()
+end)
+
+blockRecentButton.MouseButton1Click:Connect(function()
+    if not lastTradePartner then
+        warn("[MockTrade] No recent trade partner.");
+        return
+    end
+    local targetPlayer = Players:FindFirstChild(lastTradePartner)
+    if not targetPlayer then
+        warn("[MockTrade] Player not found in server.");
+        return
+    end
+    blockRecentButton.Text = "Blocking..."
+    task.spawn(function()
+        local ok = BlockPlayer(targetPlayer)
+        blockRecentButton.Text = ok and "Blocked!" or "Failed"
+        task.wait(1.5)
+        blockRecentButton.Text = "Block Recent Partner"
+    end)
+end)
+
+startTradeButton.MouseButton1Click:Connect(function()
+    if not lastTradePartner then
+        warn("[MockTrade] No partner selected.")
+        return
+    end
+    if fakeTradeActive then
+        warn("[MockTrade] A trade is already active.")
+        return
+    end
+
+    -- Show incoming trade request on leaderboard
+    local currentLB = Leaderboard:FindFirstChild("Container")
+    if currentLB then
+        TradeRequestFrame = currentLB:FindFirstChild("TradeRequest")
+    end
+
+    if TradeRequestFrame then
+        -- Show ReceivingRequest screen (the "accept/decline" view)
+        for _, child in pairs(TradeRequestFrame:GetChildren()) do
+            if child:IsA("Frame") then
+                child.Visible = child.Name == "ReceivingRequest"
+            end
+        end
+        if TradeRequestFrame:FindFirstChild("ReceivingRequest") then
+            local usernameLabel = TradeRequestFrame.ReceivingRequest:FindFirstChild("Username")
+            if usernameLabel then
+                usernameLabel.Text = lastTradePartner
+            end
+
+            -- Hook Accept button
+            local acceptBtn = TradeRequestFrame.ReceivingRequest:FindFirstChild("Accept")
+            if acceptBtn then
+                local acceptConn
+                acceptConn = acceptBtn.MouseButton1Click:Connect(function()
+                    acceptConn:Disconnect()
+                    TradeRequestFrame.Visible = false
+                    startFakeTrade(lastTradePartner)
+                end)
+            end
+
+            -- Hook Decline button
+            local declineBtn = TradeRequestFrame.ReceivingRequest:FindFirstChild("Decline")
+            if declineBtn then
+                local declineConn
+                declineConn = declineBtn.MouseButton1Click:Connect(function()
+                    declineConn:Disconnect()
+                    TradeRequestFrame.Visible = false
+                    print("[MockTrade] Trade request declined.")
+                end)
+            end
+        end
+        TradeRequestFrame.Visible = true
+    else
+        -- Fallback: start trade directly
+        startFakeTrade(lastTradePartner)
+    end
+end)
+
+sendRealTradeButton.MouseButton1Click:Connect(function()
+    if not lastTradePartner then
+        warn("[MockTrade] No partner selected.")
+        return
+    end
+    if fakePlayerFrames[lastTradePartner] then
+        warn("[MockTrade] Can't send real trade to a fake player.")
+        return
+    end
+    local target = Players:FindFirstChild(lastTradePartner)
+    if not target then
+        warn("[MockTrade] Player not in server.")
+        return
+    end
+
+    sendRealTradeButton.Text = "Sending..."
+    task.spawn(function()
+        local ok, err = pcall(function()
+            ReplicatedStorage:WaitForChild("Trade"):WaitForChild("SendRequest"):InvokeServer(target)
+        end)
+        if ok then
+            sendRealTradeButton.Text = "Sent!"
+            print("[MockTrade] Real trade request sent to: " .. lastTradePartner)
+        else
+            sendRealTradeButton.Text = "Failed"
+            warn("[MockTrade] Failed: " .. tostring(err))
+        end
+        task.wait(1.5)
+        sendRealTradeButton.Text = "Send Real Trade"
+    end)
+end)
+
+
+showRandomTradeRequest = function()
+    if fakeTradeActive or fakeRequestActive then
+        return
+    end
+
+    -- Pick a random real player from the server
+    local otherPlayers = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            table.insert(otherPlayers, player.Name)
+        end
+    end
+    if #otherPlayers == 0 then
+        return
+    end
+    local fakeName = otherPlayers[math.random(1, #otherPlayers)]
+
+    local currentLB = Leaderboard:FindFirstChild("Container")
+    if currentLB then
+        TradeRequestFrame = currentLB:FindFirstChild("TradeRequest")
+    end
+
+    if not TradeRequestFrame then
+        return
+    end
+
+    for _, child in pairs(TradeRequestFrame:GetChildren()) do
+        if child:IsA("Frame") then
+            child.Visible = child.Name == "ReceivingRequest"
+        end
+    end
+    if TradeRequestFrame:FindFirstChild("ReceivingRequest") then
+        local usernameLabel = TradeRequestFrame.ReceivingRequest:FindFirstChild("Username")
+        if usernameLabel then
+            usernameLabel.Text = fakeName
+        end
+
+        local acceptBtn = TradeRequestFrame.ReceivingRequest:FindFirstChild("Accept")
+        if acceptBtn then
+            local acceptConn
+            acceptConn = acceptBtn.MouseButton1Click:Connect(function()
+                acceptConn:Disconnect()
+                TradeRequestFrame.Visible = false
+                lastTradePartner = fakeName
+                recentLabel.Text = fakeName
+                startFakeTrade(fakeName)
+            end)
+        end
+
+        local declineBtn = TradeRequestFrame.ReceivingRequest:FindFirstChild("Decline")
+        if declineBtn then
+            local declineConn
+            declineConn = declineBtn.MouseButton1Click:Connect(function()
+                declineConn:Disconnect()
+                TradeRequestFrame.Visible = false
+                -- Queue next random trade after decline
+                if autoTradeEnabled then
+                    task.delay(autoTradeDelay, function()
+                        if autoTradeEnabled and not fakeTradeActive and not fakeRequestActive then
+                            showRandomTradeRequest()
+                        end
+                    end)
+                end
+            end)
+        end
+    end
+    TradeRequestFrame.Visible = true
+end
+
+Players.PlayerAdded:Connect(function(p)
+    playerValueCache[p.Name] = nil
+    task.defer(rebuildUsersTab)
+end)
+Players.PlayerRemoving:Connect(function(p)
+    playerValueCache[p.Name] = nil
+    task.defer(rebuildUsersTab)
+end)
+-------------------------------------------------
+-- 7. Trade System
+-------------------------------------------------
+local origSendTradeRequest = TradeModule.SendTradeRequest
+TradeModule.SendTradeRequest = function(playerName)
+    if playerName == nil then
+        return
+    end
+    if fakePlayerFrames[playerName] then
+        return
+    end
+    return origSendTradeRequest(playerName)
+end
+
+local function updateTradeInventoryDisplay()
+    if not TradeModule.TradeInventory then
+        return
+    end
+    for category, tabs in pairs(TradeModule.TradeInventory.Data) do
+        for _, items in pairs(tabs) do
+            for itemID, itemData in pairs(items) do
+                local frame = itemData.Frame
+                if frame then
+                    local baseAmount = itemData.Amount
+                    for _, offered in ipairs(fakeYourOffer) do
+                        if offered.ItemID == itemID and offered.ItemType == category then
+                            baseAmount = baseAmount - (offered.Amount or 1)
+                        end
+                    end
+                    if baseAmount > 1 then
+                        frame.Container.Amount.Text = "x" .. baseAmount
+                        frame.Visible = true
+                    elseif baseAmount == 1 then
+                        frame.Container.Amount.Text = ""
+                        frame.Visible = true
+                    else
+                        frame.Visible = false
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function displayOfferItems(panel, offerTable)
+    if offerSlotConnections[panel] then
+        for _, conn in ipairs(offerSlotConnections[panel]) do
+            conn:Disconnect()
+        end
+    end
+    offerSlotConnections[panel] = {}
+    for _, child in pairs(panel.Container:GetChildren()) do
+        if child:IsA("Frame") then
+            child.Visible = false
+        end
+    end
+    for i, item in ipairs(offerTable) do
+        local slot = panel.Container:FindFirstChild("NewItem" .. i)
+        if slot then
+            local itemData = {}
+            local source = Sync[item.ItemType] and Sync[item.ItemType][item.ItemID]
+            if source then
+                for k, v in pairs(source) do
+                    itemData[k] = v
+                end
+                itemData.DataType = item.ItemType
+                itemData.Amount = item.Amount or 1
+                ItemModule.DisplayItem(slot, itemData)
+                slot.Visible = true
+                if panel == YourOffer then
+                    local actionBtn = slot:FindFirstChild("Container") and slot.Container:FindFirstChild("ActionButton")
+                    if actionBtn then
+                        local conn = actionBtn.MouseButton1Click:Connect(function()
+                            if not fakeTradeActive then
+                                return
+                            end
+                            for idx, offered in ipairs(fakeYourOffer) do
+                                if offered.ItemID == item.ItemID and offered.ItemType == item.ItemType then
+                                    if offered.Amount > 1 then
+                                        offered.Amount = offered.Amount - 1
+                                    else
+                                        table.remove(fakeYourOffer, idx)
+                                    end
+                                    break
+                                end
+                            end
+                            refreshTradeDisplay()
+                            startAcceptCooldown()
+                        end)
+                        table.insert(offerSlotConnections[panel], conn)
+                    end
+                end
+            end
+        end
+    end
+end
+
+refreshTradeDisplay = function()
+    displayOfferItems(YourOffer, fakeYourOffer)
+    displayOfferItems(TheirOffer, fakeTheirOffer)
+    TheirOffer.Username.Text = "(" .. (fakeTradeName or "???") .. ")"
+    YourOffer.Accepted.Visible = false
+    TheirOffer.Accepted.Visible = false
+    if TradeActions:FindFirstChild("Accept") then
+        if TradeActions.Accept:FindFirstChild("Cancel") then
+            TradeActions.Accept.Cancel.Visible = false
+        end
+if TradeActions.Accept:FindFirstChild("AddItem") then
+            local hasItems = #fakeYourOffer > 0 or #fakeTheirOffer > 0
+            TradeActions.Accept.AddItem.Visible = not hasItems
+        end
+    end
+    updateTradeInventoryDisplay()
+end
+
+startFakeTrade = function(playerName)
+    fakeTradeName = playerName
+    fakeTradeActive = true
+    -- Disable game's accept handlers during fake trade
+    if not originalAcceptConns then
+        local acceptBtn = TradeActions.Accept:FindFirstChild("ActionButton")
+        if acceptBtn then
+            originalAcceptConns = getconnections(acceptBtn.MouseButton1Click)
+            for _, conn in ipairs(originalAcceptConns) do
+                conn:Disable()
+            end
+        end
+    end
+    fakeTheirOffer = {}
+    fakeYourOffer = {}
+    TradeModule.GUI.TradeGUI = TradeGUI
+    TradeModule.GUI.Actions = TradeActions
+    TradeModule.GUI.YourOffer = YourOffer
+    TradeModule.GUI.TheirOffer = TheirOffer
+
+    local itemsFrame = TradeContainer:FindFirstChild("Items")
+    if itemsFrame then
+        local mf = itemsFrame:FindFirstChild("Main")
+        if mf then
+            for _, category in pairs({"Weapons", "Pets"}) do
+                local catFrame = mf:FindFirstChild(category)
+                if catFrame then
+                    local container = catFrame:FindFirstChild("Items") and catFrame.Items:FindFirstChild("Container")
+                    if container then
+                        for _, tab in pairs(container:GetChildren()) do
+                            if tab:FindFirstChild("Container") then
+                                tab.Container:ClearAllChildren()
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        TradeModule.TradeInventory = InventoryModule.GenerateInventory(itemsFrame, ProfileData, "Trading")
+        TradeModule.ConnectOfferButtons(TradeModule.TradeInventory)
+    end
+
+    TradeGUI.Enabled = true
+    if TradeGUI:FindFirstChild("ClickBlocker") then
+        TradeGUI.ClickBlocker.Visible = false
+    end
+    TheirOffer.Username.Text = "(" .. playerName .. ")"
+    refreshTradeDisplay()
+    -- Reset accept confirmation state
+    if TradeActions.Accept:FindFirstChild("Confirm") then
+        TradeActions.Accept.Confirm.Visible = false
+    end
+    if TradeActions.Accept:FindFirstChild("Cancel") then
+        TradeActions.Accept.Cancel.Visible = false
+    end
+    if TradeActions.Accept:FindFirstChild("AddItem") then
+        TradeActions.Accept.AddItem.Visible = true  -- no items yet on open
+    end
+    -- Connect search bar
+    local itemsFrame = TradeContainer:FindFirstChild("Items")
+    if itemsFrame then
+        local searchFrame = itemsFrame:FindFirstChild("Tabs") and itemsFrame.Tabs:FindFirstChild("Search")
+        if searchFrame then
+            local searchBox = searchFrame:FindFirstChild("Container") and
+                                  searchFrame.Container:FindFirstChild("SearchText")
+            if searchBox and TradeModule.TradeInventory then
+                searchBox.Text = ""
+                searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+                    local query = string.lower(searchBox.Text)
+                    for category, tabs in pairs(TradeModule.TradeInventory.Data) do
+                        for _, items in pairs(tabs) do
+                            for itemID, itemData in pairs(items) do
+                                if itemData.Frame then
+                                    if query == "" then
+                                        itemData.Frame.Visible = true
+                                    else
+                                        local name = string.lower(itemData.Name or itemID)
+                                        itemData.Frame.Visible = string.find(name, query) ~= nil
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    end
+    -- Disconnect previous mock handlers if any
+    if mockAcceptConn then
+        mockAcceptConn:Disconnect()
+    end
+    if mockConfirmConn then
+        mockConfirmConn:Disconnect()
+    end
+    if mockCancelConn then
+        mockCancelConn:Disconnect()
+    end
+
+    -- Step 1: Accept button shows "Are you sure?" confirm
+    mockAcceptConn = TradeActions.Accept.ActionButton.MouseButton1Click:Connect(function()
+        if not fakeTradeActive then
+            return
+        end
+        if fakeAcceptCooldown > 0 then
+            return
+        end
+        -- FIX: Don't allow accepting with no items on either side
+        if #fakeYourOffer == 0 and #fakeTheirOffer == 0 then
+            return
+        end
+        TradeActions.Accept.Confirm.Visible = true
+    end)
+
+    -- Step 2: Confirm button actually accepts
+    local confirmBtn = TradeActions.Accept:FindFirstChild("Confirm")
+    if confirmBtn then
+        local confirmActionBtn = confirmBtn:FindFirstChild("ActionButton")
+        if confirmActionBtn then
+            if mockConfirmConn then
+                mockConfirmConn:Disconnect()
+            end
+            mockConfirmConn = confirmActionBtn.MouseButton1Click:Connect(function()
+                if not fakeTradeActive then
+                    return
+                end
+                if fakeAcceptCooldown > 0 then
+                    return
+                end
+                -- FIX: Don't allow accepting with no items on either side
+                if #fakeYourOffer == 0 and #fakeTheirOffer == 0 then
+                    return
+                end
+
+                YourOffer.Accepted.Visible = true
+                -- ... rest of code
+                TradeActions.Accept.Confirm.Visible = false
+                if TradeActions.Accept:FindFirstChild("Cancel") then
+                    TradeActions.Accept.Cancel.Visible = true
+                end
+
+                task.delay(fakeAcceptDelay, function()
+                    if not fakeTradeActive or not YourOffer.Accepted.Visible then
+                        return
+                    end
+                    TheirOffer.Accepted.Visible = true
+                    task.delay(0.5, function()
+                        if not fakeTradeActive or not YourOffer.Accepted.Visible then
+                            return
+                        end
+                        lastTradePartner = fakeTradeName
+                        recentLabel.Text = fakeTradeName
+                        print("[MockTrade] Trade completed!")
+                        print("[MockTrade] You gave:", #fakeYourOffer, "items")
+                        print("[MockTrade] You received:", #fakeTheirOffer, "items")
+
+                        for _, receivedItem in ipairs(fakeTheirOffer) do
+                            ItemPopupService:AddNewItem(receivedItem.ItemID, receivedItem.ItemType, receivedItem.Amount)
+                        end
+
+                        setthreadidentity(2)
+                        for _, receivedItem in ipairs(fakeTheirOffer) do
+                            local category = receivedItem.ItemType
+                            if category == "Weapons" then
+                                for _ = 1, (receivedItem.Amount or 1) do
+                                    ProfileData[category].Owned[receivedItem.ItemID] =
+                                        (ProfileData[category].Owned[receivedItem.ItemID] or 0) + 1
+                                end
+                                local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+                                if remotes then
+                                    local inv = remotes:FindFirstChild("Inventory")
+                                    if inv then
+                                        local changed = inv:FindFirstChild("InventoryDataChanged")
+                                        if changed then
+                                            changed:Fire(category, receivedItem.ItemID,
+                                                ProfileData[category].Owned[receivedItem.ItemID])
+                                        end
+                                    end
+                                end
+                            elseif category == "Pets" then
+                                ProfileData[category].Owned[receivedItem.ItemID] =
+                                    (ProfileData[category].Owned[receivedItem.ItemID] or 0) + (receivedItem.Amount or 1)
+                            end
+                        end
+                        setthreadidentity(8)
+
+                        for _, givenItem in ipairs(fakeYourOffer) do
+                            local category = givenItem.ItemType
+                            if category == "Weapons" or category == "Pets" then
+                                local owned = ProfileData[category].Owned
+                                if owned[givenItem.ItemID] then
+                                    owned[givenItem.ItemID] = owned[givenItem.ItemID] - (givenItem.Amount or 1)
+                                    if owned[givenItem.ItemID] <= 0 then
+                                        owned[givenItem.ItemID] = nil
+                                    end
+                                end
+                            end
+                        end
+                        closeFakeTrade()
+                    end)
+                end)
+            end)
+        end
+    end
+
+    if TradeActions.Accept:FindFirstChild("Cancel") then
+        mockCancelConn = TradeActions.Accept.Cancel.ActionButton.MouseButton1Click:Connect(function()
+            if not fakeTradeActive then
+                return
+            end
+            YourOffer.Accepted.Visible = false
+            TheirOffer.Accepted.Visible = false
+            if TradeActions.Accept:FindFirstChild("Cancel") then
+                TradeActions.Accept.Cancel.Visible = false
+            end
+        end)
+    end
+    print("[MockTrade] Fake trade started with: " .. playerName)
+end
+
+closeFakeTrade = function()
+    fakeTradeActive = false
+    fakeTradeName = nil
+    fakeTheirOffer = {}
+    fakeYourOffer = {}
+    TradeGUI.Enabled = false
+    if TradeGUI:FindFirstChild("ClickBlocker") then
+        TradeGUI.ClickBlocker.Visible = false
+    end
+    -- Disconnect mock handlers
+    if mockAcceptConn then
+        mockAcceptConn:Disconnect();
+        mockAcceptConn = nil
+    end
+    if mockConfirmConn then
+        mockConfirmConn:Disconnect();
+        mockConfirmConn = nil
+    end
+    if mockCancelConn then
+        mockCancelConn:Disconnect();
+        mockCancelConn = nil
+    end
+    -- Re-enable game's accept handlers for real trades
+    if originalAcceptConns then
+        for _, conn in ipairs(originalAcceptConns) do
+            conn:Enable()
+        end
+        originalAcceptConns = nil
+    end
+    TradeModule.TradeInventory = nil
+
+    -- Queue next auto trade if enabled
+    if autoTradeEnabled then
+        task.delay(autoTradeDelay, function()
+            if autoTradeEnabled and not fakeTradeActive and not fakeRequestActive then
+                showRandomTradeRequest()
+            end
+        end)
+    end
+end
+
+-- Trade request popup
+local function startFakeTradeRequest(playerName)
+    fakeRequestActive = true
+    fakeRequestTarget = playerName
+    local currentLB = Leaderboard:FindFirstChild("Container")
+    if currentLB then
+        TradeRequestFrame = currentLB:FindFirstChild("TradeRequest")
+    end
+    if TradeRequestFrame then
+        for _, child in pairs(TradeRequestFrame:GetChildren()) do
+            if child:IsA("Frame") then
+                child.Visible = child.Name == "SendingRequest"
+            end
+        end
+        if TradeRequestFrame:FindFirstChild("SendingRequest") then
+            local usernameLabel = TradeRequestFrame.SendingRequest:FindFirstChild("Username")
+            if usernameLabel then
+                usernameLabel.Text = playerName
+            end
+        end
+        TradeRequestFrame.Visible = true
+        task.delay(fakeAcceptDelay, function()
+            if not fakeRequestActive then
+                return
+            end
+            TradeRequestFrame.Visible = false
+            fakeRequestActive = false
+            startFakeTrade(fakeRequestTarget)
+        end)
+    else
+        startFakeTrade(playerName)
+    end
+end
+
+local function cancelFakeRequest()
+    fakeRequestActive = false
+    fakeRequestTarget = nil
+    if TradeRequestFrame then
+        TradeRequestFrame.Visible = false
+    end
+end
+
+-- Cancel button on SendingRequest
+if TradeRequestFrame and TradeRequestFrame:FindFirstChild("SendingRequest") then
+    local cancelBtn = TradeRequestFrame.SendingRequest:FindFirstChild("Cancel")
+    if cancelBtn then
+        cancelBtn.MouseButton1Click:Connect(function()
+            if fakeRequestActive then
+                cancelFakeRequest();
+                print("[MockTrade] Trade request cancelled.")
+            end
+        end)
+    end
+end
+
+-- Inspect hooks (trade + profile)
+local Inspect = Leaderboard:FindFirstChild("Inspect")
+
+if Inspect and Inspect:FindFirstChild("Container") then
+    local tradeButton = Inspect.Container:FindFirstChild("Trade")
+    if tradeButton then
+        tradeButton.MouseButton1Click:Connect(function()
+            local targetName = Inspect.Container.Username.Text
+            if fakePlayerFrames[targetName] then
+                Inspect.Visible = false
+                startFakeTradeRequest(targetName)
+            end
+        end)
+    end
+end
+
+-- Profile button — disable game's handler, replace with ours
+local GetPlayerProfileRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Misc"):WaitForChild(
+    "GetPlayerProfile")
+if Inspect and Inspect:FindFirstChild("Container") then
+    local profileButton = Inspect.Container:FindFirstChild("Profile")
+    if profileButton then
+        local originalConnections = getconnections(profileButton.Activated)
+        for _, conn in ipairs(originalConnections) do
+            conn:Disable()
+        end
+        profileButton.Activated:Connect(function()
+            local targetName = Inspect.Container.Username.Text
+            Inspect.Visible = false
+            if fakePlayerFrames[targetName] then
+                local cached = getFakeProfileData(targetName)
+                local ViewProfile = MainGUI:WaitForChild("Game"):WaitForChild("ViewProfile")
+                ViewProfileModule.GenerateProfile(ViewProfile, targetName, cached.profile)
+                local WindowService = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("WindowService"))
+                WindowService:ViewFrame("ViewProfile")
+            else
+                local v50 = GetPlayerProfileRemote:InvokeServer(targetName)
+                local ViewProfile = MainGUI:WaitForChild("Game"):WaitForChild("ViewProfile")
+                ViewProfileModule.GenerateProfile(ViewProfile, targetName, v50)
+                local WindowService = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("WindowService"))
+                WindowService:ViewFrame("ViewProfile")
+            end
+        end)
+    end
+end
+
+-- Decline button
+if TradeActions:FindFirstChild("Decline") then
+    TradeActions.Decline.ActionButton.MouseButton1Click:Connect(function()
+        if fakeTradeActive then
+            closeFakeTrade();
+            print("[MockTrade] Fake trade declined.")
+        end
+    end)
+end
+
+-- Accept cooldown
+startAcceptCooldown = function()
+    fakeAcceptCooldown = 6
+    local cooldownFrame = TradeActions.Accept:FindFirstChild("Cooldown")
+    if cooldownFrame then
+        cooldownFrame.Visible = true
+        if cooldownFrame:FindFirstChild("Title") then
+            cooldownFrame.Title.Text = " Please wait (" .. fakeAcceptCooldown .. ") before accepting."
+        end
+    end
+    if fakeAcceptCoolingDown then
+        fakeAcceptCooldown = 6;
+        return
+    end
+    fakeAcceptCoolingDown = true
+    task.spawn(function()
+        while fakeAcceptCooldown > 0 and fakeTradeActive do
+            task.wait(1)
+            fakeAcceptCooldown = fakeAcceptCooldown - 1
+            if cooldownFrame and cooldownFrame:FindFirstChild("Title") then
+                cooldownFrame.Title.Text = " Please wait (" .. fakeAcceptCooldown .. ") before accepting."
+            end
+        end
+        fakeAcceptCoolingDown = false
+        if cooldownFrame then
+            cooldownFrame.Visible = false
+        end
+    end)
+end
+
+-------------------------------------------------
+-- 8. Remote Hooks
+-------------------------------------------------
+local realOfferItem = ReplicatedStorage:WaitForChild("Trade"):WaitForChild("OfferItem")
+local realRemoveOffer = ReplicatedStorage:WaitForChild("Trade"):WaitForChild("RemoveOffer")
+local realCancelRequest = ReplicatedStorage:WaitForChild("Trade"):WaitForChild("CancelRequest")
+local oldNamecall
+
+oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    if method == "FireServer" then
+        if self == realCancelRequest and fakeRequestActive then
+            cancelFakeRequest()
+            print("[MockTrade] Trade request cancelled (via remote).")
+            return
+        end
+        if fakeTradeActive then
+            if self == realOfferItem then
+                local args = {...}
+                local itemID = args[1]
+                local itemType = args[2]
+                if itemID == "DefaultKnife" or itemID == "DefaultGun" or itemID == "Synthwave_Godly" or itemID ==
+                    "IceHammer_Godly" or itemID == "Gingerscythe_Godly" or itemID == "Reaver_Godly" or itemID ==
+                    "Reaver_Ancient" or itemID == "IceHammer_Ancient" then
+                    return
+                end
+                for _, item in ipairs(fakeYourOffer) do
+                    if item.ItemID == itemID and item.ItemType == itemType then
+                        item.Amount = (item.Amount or 1) + 1
+                        refreshTradeDisplay()
+                        startAcceptCooldown()
+                        print("[MockTrade] You offered: " .. itemID .. " x" .. item.Amount)
+                        return
+                    end
+                end
+                if #fakeYourOffer >= 4 then
+                    warn("[MockTrade] Your offer is full (4 slots).");
+                    return
+                end
+                table.insert(fakeYourOffer, {
+                    ItemID = itemID,
+                    ItemType = itemType,
+                    Amount = 1
+                })
+                refreshTradeDisplay()
+                startAcceptCooldown()
+                print("[MockTrade] You offered: " .. itemID .. " (" .. itemType .. ")")
+                return
+            elseif self == realRemoveOffer then
+                return
+            end
+        end
+    end
+    return oldNamecall(self, ...)
+end))
+
+-------------------------------------------------
+-- 9. Fake Profile System
+-------------------------------------------------
+local function generateRandomInventory(playerName)
+    local profile = {
+        Level = 1,
+        XP = 0,
+        Prestige = 0,
+        Elite = false,
+        MapBuilder = false,
+        WeaponDesigner = false,
+        Nikilis = false,
+        BetaTester = false,
+        Clown = false,
+        Eliminations = math.random(0, 5000),
+        Victories = math.random(0, 1000),
+        Survivals = math.random(0, 3000),
+        Trophies = nil,
+        Coins = math.random(0, 50000),
+        PetName = "Pet",
+        DeathEffect = true
+    }
+    local data = fakePlayerData[playerName]
+    if data then
+        profile.Level = data.level or 1
+        profile.Prestige = data.prestige or 0
+        profile.XP = (data.level or 1) * 100
+    end
+    return profile
+end
+
+local function generateRandomFullInventory()
+    local inv = {
+        Weapons = {
+            Owned = {},
+            Equipped = {
+                Knife = "DefaultKnife",
+                Gun = "DefaultGun"
+            }
+        },
+        Effects = {
+            Owned = {},
+            Equipped = {}
+        },
+        Perks = {
+            Owned = {},
+            Equipped = {}
+        },
+        Emotes = {
+            Owned = {},
+            Equipped = {}
+        },
+        Radios = {
+            Owned = {},
+            Equipped = {}
+        },
+        Pets = {
+            Owned = {},
+            Equipped = {}
+        },
+        Uniques = {}
+    }
+
+    local function collectKeys(tbl)
+        local keys = {}
+        for id, data in pairs(tbl) do
+            if typeof(data) == "table" and (data.ItemName or data.Name) then
+                table.insert(keys, id)
+            end
+        end
+        return keys
+    end
+
+    local function pickRandom(keys, min, max)
+        local picked = {}
+        local count = math.random(min, math.min(max, #keys))
+        for _ = 1, count do
+            if #keys == 0 then
+                break
+            end
+            local pick = math.random(1, #keys)
+            table.insert(picked, keys[pick])
+            table.remove(keys, pick)
+        end
+        return picked
+    end
+
+    -- Weapons
+    local wKeys = {}
+    for id, data in pairs(Sync.Weapons) do
+        if id ~= "DefaultKnife" and id ~= "DefaultGun" and typeof(data) == "table" and (data.ItemName or data.Name) then
+            table.insert(wKeys, id)
+        end
+    end
+    for _, id in ipairs(pickRandom(wKeys, 5, 20)) do
+        inv.Weapons.Owned[id] = math.random(1, 3)
+    end
+
+    -- Effects
+    if Sync.Effects then
+        for _, id in ipairs(pickRandom(collectKeys(Sync.Effects), 2, 8)) do
+            table.insert(inv.Effects.Owned, id)
+        end
+    end
+    -- Perks
+    if Sync.Perks then
+        for _, id in ipairs(pickRandom(collectKeys(Sync.Perks), 1, 5)) do
+            table.insert(inv.Perks.Owned, id)
+        end
+    end
+    -- Emotes
+    if Sync.Emotes then
+        for _, id in ipairs(pickRandom(collectKeys(Sync.Emotes), 2, 6)) do
+            table.insert(inv.Emotes.Owned, id)
+        end
+    end
+    -- Radios
+    if Sync.Radios then
+        for _, id in ipairs(pickRandom(collectKeys(Sync.Radios), 1, 4)) do
+            table.insert(inv.Radios.Owned, id)
+        end
+    end
+    -- Pets
+    if Sync.Pets then
+        for _, id in ipairs(pickRandom(collectKeys(Sync.Pets), 1, 6)) do
+            inv.Pets.Owned[id] = math.random(1, 2)
+        end
+    end
+
+    return inv
+end
+
+getFakeProfileData = function(playerName)
+    if not fakeProfileCache[playerName] or not fakeProfileCache[playerName].profile then
+        local existingAvatar = fakeProfileCache[playerName] and fakeProfileCache[playerName].avatarImage
+        fakeProfileCache[playerName] = {
+            profile = generateRandomInventory(playerName),
+            inventory = generateRandomFullInventory(),
+            avatarImage = existingAvatar
+        }
+        if not fakeProfileCache[playerName].avatarImage then
+            local randomUserId = spoofAvatarIds[math.random(1, #spoofAvatarIds)]
+            local ok, img = pcall(function()
+                return Players:GetUserThumbnailAsync(randomUserId, Enum.ThumbnailType.AvatarBust,
+                    Enum.ThumbnailSize.Size352x352)
+            end)
+            if ok then
+                fakeProfileCache[playerName].avatarImage = img
+            end
+        end
+    end
+    return fakeProfileCache[playerName]
+end
+
+-- Hook GenerateProfile
+local origGenerateProfile = ViewProfileModule.GenerateProfile
+ViewProfileModule.GenerateProfile = function(p8, p9, p10, p11)
+    if fakePlayerFrames[p9] then
+        local cached = getFakeProfileData(p9)
+        local profileData = cached.profile
+        local profileContainer = ViewProfileModule.GUI.ProfileContainer
+        if profileContainer then
+            local character = profileContainer:FindFirstChild("Character")
+            if character and character:FindFirstChild("CharacterIcon") then
+                character.CharacterIcon.Image = cached.avatarImage or ""
+            end
+            local usernameLabel = profileContainer:FindFirstChild("Username") or
+                                      profileContainer.Parent:FindFirstChild("Username")
+            if usernameLabel then
+                usernameLabel.Text = p9
+            end
+
+            local levelFrame = character and character.CharacterIcon:FindFirstChild("LevelFrame")
+            if levelFrame then
+                local levelContainer = levelFrame:FindFirstChild("LevelContainer")
+                if levelContainer then
+                    local icon = levelContainer:FindFirstChild("Icon")
+                    if icon and icon:FindFirstChild("Level") then
+                        icon.Level.Text = profileData.Level
+                    end
+                    local prestige = levelContainer:FindFirstChild("Prestige")
+                    if prestige then
+                        prestige.Visible = profileData.Prestige > 0
+                        if profileData.Prestige > 0 then
+                            prestige.Text = romanNumerals[profileData.Prestige] or ""
+                        end
+                    end
+                end
+            end
+
+            if character then
+                if character:FindFirstChild("Elite") then
+                    character.Elite.Visible = profileData.Elite == true
+                end
+                if character:FindFirstChild("Builder") then
+                    character.Builder.Visible = profileData.MapBuilder == true
+                end
+                if character:FindFirstChild("WeaponDesigner") then
+                    character.WeaponDesigner.Visible = profileData.WeaponDesigner == true
+                end
+                if character:FindFirstChild("MM2Creator") then
+                    character.MM2Creator.Visible = profileData.Nikilis == true
+                end
+                if character:FindFirstChild("BetaTester") then
+                    character.BetaTester.Visible = profileData.BetaTester == true
+                end
+                if character:FindFirstChild("Clown") then
+                    character.Clown.Visible = profileData.Clown == true
+                end
+            end
+
+            local statsContainer = profileContainer:FindFirstChild("Profile")
+            if statsContainer then
+                local s1 = statsContainer:FindFirstChild("Season1Stats")
+                if s1 and s1:FindFirstChild("Container") then
+                    local c = s1.Container
+                    if c:FindFirstChild("Eliminations") then
+                        c.Eliminations.Amount.Text = profileData.Eliminations
+                    end
+                    if c:FindFirstChild("Saves") then
+                        c.Saves.Amount.Text = profileData.Victories
+                    end
+                    if c:FindFirstChild("Survivals") then
+                        c.Survivals.Amount.Text = profileData.Survivals
+                    end
+                end
+                local trophies = statsContainer:FindFirstChild("Trophies")
+                if trophies then
+                    trophies.Visible = false
+                end
+            end
+
+            if p8 and p8:FindFirstChild("Nav") then
+                local navProfile = p8.Nav:FindFirstChild("Profile")
+                if navProfile and navProfile:FindFirstChild("Icon") then
+                    navProfile.Icon.Image = cached.avatarImage or ""
+                end
+            end
+        end
+        ViewProfileModule.DisplayInventoryFake(p8, p9, cached.inventory, p11)
+        return
+    end
+    return origGenerateProfile(p8, p9, p10, p11)
+end
+
+ViewProfileModule.DisplayInventoryFake = function(p26, p27, fakeInv, p28)
+    local InventoryModuleRef = require(ReplicatedStorage.Modules.InventoryModule)
+    for _, category in pairs({"Weapons", "Effects", "Perks", "Emotes", "Radios", "Pets"}) do
+        local catFrame = p26.Main:FindFirstChild(category)
+        if catFrame then
+            local titleFrame = catFrame:FindFirstChild("Title")
+            if titleFrame then
+                titleFrame.Username.Text = p27 .. "'s " .. category
+            end
+            for tabName, _ in pairs(InventoryModuleRef.CreateBlankInventoryTable()[category]) do
+                local tabContainer = catFrame.Items.Container:FindFirstChild(tabName) or
+                                         (catFrame.Items.Container:FindFirstChild("Holiday") and
+                                             catFrame.Items.Container.Holiday.Container:FindFirstChild(tabName))
+                if tabContainer and tabContainer:FindFirstChild("Container") then
+                    tabContainer.Container:ClearAllChildren()
+                end
+            end
+        end
+    end
+    local generated = InventoryModuleRef.GenerateInventory(p26, fakeInv, nil, p28)
+    ViewProfileModule.PlayerInventories[p27] = generated
+end
+
+-- Hook DisplayInventory to use local ProfileData for self
+local origDisplayInventory = ViewProfileModule.DisplayInventory
+ViewProfileModule.DisplayInventory = function(p26, p27, p28)
+    if p27 == LocalPlayer.Name then
+        ViewProfileModule.DisplayInventoryFake(p26, p27, ProfileData, p28)
+        return
+    end
+    return origDisplayInventory(p26, p27, p28)
+end
+
+-------------------------------------------------
+-- 10. Respawn / Re-injection
+-------------------------------------------------
+local reinjecting = false
+
+local function reinjectAll()
+    if reinjecting then
+        return
+    end
+    reinjecting = true
+    local freshGUI = PlayerGui:FindFirstChild("MainGUI")
+    if freshGUI then
+        local freshLB = freshGUI:FindFirstChild("Game") and freshGUI.Game:FindFirstChild("Leaderboard")
+        if freshLB then
+            Leaderboard = freshLB
+            LeaderboardContainer = freshLB:FindFirstChild("Container") or freshLB:WaitForChild("Container")
+        end
+    end
+    for name, data in pairs(fakePlayerData) do
+        if not LeaderboardContainer:FindFirstChild("FAKE_" .. name) then
+            fakePlayerFrames[name] = nil
+            origAddFakePlayer(name, data.level, data.prestige, data.isElite)
+        end
+    end
+    sortLeaderboard()
+    reinjecting = false
+end
+
+local function setupChildRemovedListener()
+    LeaderboardContainer.ChildRemoved:Connect(function(child)
+        if string.find(child.Name, "FAKE_") then
+            local fakeName = string.sub(child.Name, 6)
+            if fakePlayerData[fakeName] then
+                local currentGUI = PlayerGui:FindFirstChild("MainGUI")
+                if currentGUI then
+                    local currentLB = currentGUI:FindFirstChild("Game") and
+                                          currentGUI.Game:FindFirstChild("Leaderboard")
+                    if currentLB and currentLB:FindFirstChild("Container") == LeaderboardContainer then
+                        task.defer(reinjectAll)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+setupChildRemovedListener()
+
+LocalPlayer.CharacterAdded:Connect(function()
+    local freshGUI
+    repeat
+        freshGUI = PlayerGui:FindFirstChild("MainGUI")
+        if freshGUI then
+            local freshLB = freshGUI:FindFirstChild("Game") and freshGUI.Game:FindFirstChild("Leaderboard")
+            if freshLB and freshLB:FindFirstChild("Container") then
+                local hasPlayerFrame = false
+                for _, child in pairs(freshLB.Container:GetChildren()) do
+                    if child:FindFirstChild("IsPlayerFrame") then
+                        hasPlayerFrame = true;
+                        break
+                    end
+                end
+                if hasPlayerFrame then
+                    break
+                end
+            end
+        end
+        task.wait()
+    until false
+
+    reinjectAll()
+    setupChildRemovedListener()
+
+    local newInspect = Leaderboard:FindFirstChild("Inspect")
+    if newInspect and newInspect:FindFirstChild("Container") then
+        local newTradeBtn = newInspect.Container:FindFirstChild("Trade")
+        if newTradeBtn then
+            newTradeBtn.MouseButton1Click:Connect(function()
+                local targetName = newInspect.Container.Username.Text
+                if fakePlayerFrames[targetName] then
+                    newInspect.Visible = false
+                    startFakeTradeRequest(targetName)
+                end
+            end)
+        end
+    end
+end)
+
+ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Inventory"):WaitForChild("UpdateLeaderboard").OnClientEvent:Connect(
+    function()
+        task.defer(reinjectAll)
+    end)
+
+-------------------------------------------------
+-- 11. Real Trade Hook
+-------------------------------------------------
+local realAcceptTrade = ReplicatedStorage:WaitForChild("Trade"):WaitForChild("AcceptTrade")
+realAcceptTrade.OnClientEvent:Connect(function(...)
+    local partnerName = fakeTradeName
+    if not partnerName and TradeModule.GUI and TradeModule.GUI.TheirOffer then
+        local usernameText = TradeModule.GUI.TheirOffer:FindFirstChild("Username")
+        if usernameText then
+            partnerName = usernameText.Text:match("%((.+)%)") or usernameText.Text
+        end
+    end
+    if partnerName and partnerName ~= "" then
+        lastTradePartner = partnerName
+        recentLabel.Text = partnerName
+    end
+end)
+
+-------------------------------------------------
+-- 12. Global Exports
+-------------------------------------------------
+_G.MockTrade = {
+    AddPlayer = addFakePlayer,
+    RemovePlayer = removeFakePlayer,
+    ClearAll = clearFakePlayers,
+    FakePlayers = fakePlayerFrames,
+    StartTrade = startFakeTrade,
+    CloseTrade = closeFakeTrade,
+    GetFakeProfileData = getFakeProfileData,
+    AddRandomItem = function()
+        if fakeTradeActive then
+            local items = {}
+            for id, data in pairs(Sync.Weapons) do
+                if data and id ~= "DefaultKnife" and id ~= "DefaultGun" then
+                    table.insert(items, {id, "Weapons"})
+                end
+            end
+            for id, data in pairs(Sync.Pets or {}) do
+                if data then
+                    table.insert(items, {id, "Pets"})
+                end
+            end
+            if #items > 0 and #fakeTheirOffer < 4 then
+                local pick = items[math.random(1, #items)]
+                table.insert(fakeTheirOffer, {
+                    ItemID = pick[1],
+                    ItemType = pick[2],
+                    Amount = 1
+                })
+                refreshTradeDisplay()
+                startAcceptCooldown()
+            end
+        end
+    end,
+    RefreshTradeDisplay = function()
+        if refreshTradeDisplay then
+            refreshTradeDisplay()
+        end
+    end,
+    UpdateTradeInventoryDisplay = updateTradeInventoryDisplay,
+    FakeTradeActive = function()
+        return fakeTradeActive
+    end
+}
+
+print("[MockTrade] Loaded. GUI ready.")
